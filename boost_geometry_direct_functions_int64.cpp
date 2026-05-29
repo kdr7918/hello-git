@@ -20,7 +20,7 @@
 // - Boost.Geometry는 outer + hole을 하나의 ring으로 자동 연결하지 않는다.
 // - flattenContoursForStroke()는 outer/hole contour를 따로 순회한다.
 // - makeSingleStrokePaths()는 hole마다 bridge edge를 왕복 삽입해 하나의 closed walk를 만든다.
-// - bridge 후보는 outer/hole/current path와의 교차를 검사해 hole을 자르는 선을 피한다.
+// - bridge는 hole 오른쪽 끝점에서 현재 outer/path로 수평 ray를 쏴서 붙인다.
 
 #include <boost/geometry.hpp>
 #include <boost/geometry/geometries/register/point.hpp>
@@ -402,272 +402,176 @@ static std::vector<StrokeContour> flattenContoursForStroke(
 //
 //   outer ... A -> H -> hole contour -> H -> A ... outer
 //
-// bridge 후보는 다음 조건을 통과해야 한다.
-// - bridge 중점이 polygon 내부이며 어떤 hole 내부도 아니어야 한다.
-// - bridge가 outer 경계, 다른 hole 경계, 이미 삽입된 path를 가로지르지 않아야 한다.
-// - endpoint에서 만나는 것은 허용한다.
+// 처리 순서:
+// - hole을 오른쪽 끝점 기준으로 정렬한다.
+// - 각 hole의 오른쪽 끝점에서 오른쪽으로 수평 ray를 쏜다.
+// - 현재 outer/path와 처음 만나는 지점까지 bridge를 만든다.
+// - bridge + hole contour를 현재 outer/path에 splice하고, 갱신된 path로 다음 hole을 처리한다.
 //
-// 일반 self-touching/복잡 polygon까지 완전히 처리하는 범용 triangulation은 아니지만,
-// EDA 직교 polygon/hole에서 "hole을 자르지 않는" bridge를 고르는 실용 버전이다.
+// 오른쪽 hole부터 처리하므로 수평 bridge가 아직 처리하지 않은 hole을 자를 가능성을 줄인다.
+// EDA 직교 polygon/hole 기준의 실용 버전이며, 일반 복잡 polygon까지 보장하려면
+// visibility graph 또는 triangulation 기반 bridge-cut이 필요하다.
 //
 
-struct RealPoint
+struct HoleRayInfo
 {
-    long double x;
-    long double y;
-
-    RealPoint() : x(0), y(0) {}
-    RealPoint(long double x_, long double y_) : x(x_), y(y_) {}
+    size_t holeIndex;
+    size_t anchorIndex;
+    point anchor;
 };
 
-static bool sameRealPoint(const RealPoint& a, const RealPoint& b)
+struct RayHit
 {
-    const long double eps = 1e-12L;
-    return std::fabs(a.x - b.x) <= eps && std::fabs(a.y - b.y) <= eps;
+    size_t edgeStartIndex;
+    point bridgePoint;
+    long double x;
+};
+
+static void pushPointNoDup(BoostRing& ring, const point& p)
+{
+    if (ring.empty() || !samePoint(ring.back(), p))
+        ring.push_back(p);
 }
 
-static RealPoint toRealPoint(const point& p)
+static HoleRayInfo makeHoleRayInfo(size_t holeIndex, BoostRing hole)
 {
-    return RealPoint(
-        static_cast<long double>(p.x),
-        static_cast<long double>(p.y)
-    );
-}
+    removeDuplicatedLastPoint(hole);
 
-static long double cross(
-    const RealPoint& a,
-    const RealPoint& b,
-    const RealPoint& c)
-{
-    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
-}
+    if (hole.size() < 3)
+        throw std::runtime_error("invalid hole ring");
 
-static bool onSegment(
-    const RealPoint& a,
-    const RealPoint& b,
-    const RealPoint& p)
-{
-    const long double eps = 1e-12L;
+    size_t best = 0;
 
-    if (std::fabs(cross(a, b, p)) > eps)
-        return false;
-
-    return p.x >= std::min(a.x, b.x) - eps &&
-           p.x <= std::max(a.x, b.x) + eps &&
-           p.y >= std::min(a.y, b.y) - eps &&
-           p.y <= std::max(a.y, b.y) + eps;
-}
-
-static bool segmentsIntersect(
-    const RealPoint& a,
-    const RealPoint& b,
-    const RealPoint& c,
-    const RealPoint& d)
-{
-    const long double eps = 1e-12L;
-    const long double c1 = cross(a, b, c);
-    const long double c2 = cross(a, b, d);
-    const long double c3 = cross(c, d, a);
-    const long double c4 = cross(c, d, b);
-
-    if (((c1 > eps && c2 < -eps) || (c1 < -eps && c2 > eps)) &&
-        ((c3 > eps && c4 < -eps) || (c3 < -eps && c4 > eps)))
-        return true;
-
-    if (std::fabs(c1) <= eps && onSegment(a, b, c)) return true;
-    if (std::fabs(c2) <= eps && onSegment(a, b, d)) return true;
-    if (std::fabs(c3) <= eps && onSegment(c, d, a)) return true;
-    if (std::fabs(c4) <= eps && onSegment(c, d, b)) return true;
-
-    return false;
-}
-
-static bool intersectionIsOnlyAllowedEndpoint(
-    const RealPoint& bridgeA,
-    const RealPoint& bridgeB,
-    const RealPoint& edgeA,
-    const RealPoint& edgeB,
-    const RealPoint& allowedA,
-    const RealPoint& allowedB)
-{
-    const bool bridgeAAllowed =
-        sameRealPoint(bridgeA, allowedA) || sameRealPoint(bridgeA, allowedB);
-    const bool bridgeBAllowed =
-        sameRealPoint(bridgeB, allowedA) || sameRealPoint(bridgeB, allowedB);
-
-    if (bridgeAAllowed &&
-        (sameRealPoint(bridgeA, edgeA) || sameRealPoint(bridgeA, edgeB)))
-        return true;
-
-    if (bridgeBAllowed &&
-        (sameRealPoint(bridgeB, edgeA) || sameRealPoint(bridgeB, edgeB)))
-        return true;
-
-    return false;
-}
-
-static bool segmentHitsRingExceptAllowedEndpoints(
-    const point& a,
-    const point& b,
-    BoostRing ring,
-    const point& allowedA,
-    const point& allowedB)
-{
-    removeDuplicatedLastPoint(ring);
-
-    if (ring.size() < 2)
-        return false;
-
-    const RealPoint ba = toRealPoint(a);
-    const RealPoint bb = toRealPoint(b);
-    const RealPoint aa = toRealPoint(allowedA);
-    const RealPoint ab = toRealPoint(allowedB);
-
-    for (size_t i = 0; i < ring.size(); ++i)
+    for (size_t i = 1; i < hole.size(); ++i)
     {
-        const point& e0p = ring[i];
-        const point& e1p = ring[(i + 1) % ring.size()];
-
-        if (samePoint(e0p, e1p))
-            continue;
-
-        const RealPoint e0 = toRealPoint(e0p);
-        const RealPoint e1 = toRealPoint(e1p);
-
-        if (!segmentsIntersect(ba, bb, e0, e1))
-            continue;
-
-        if (intersectionIsOnlyAllowedEndpoint(ba, bb, e0, e1, aa, ab))
-            continue;
-
-        return true;
+        if (hole[i].x > hole[best].x ||
+            (hole[i].x == hole[best].x && hole[i].y < hole[best].y))
+            best = i;
     }
 
-    return false;
+    HoleRayInfo info;
+    info.holeIndex = holeIndex;
+    info.anchorIndex = best;
+    info.anchor = hole[best];
+    return info;
 }
 
-static bool pointInsideRing(const RealPoint& p, BoostRing ring)
+static std::vector<HoleRayInfo> sortedHolesForHorizontalBridge(const BoostPoly& poly)
 {
-    removeDuplicatedLastPoint(ring);
-
-    if (ring.size() < 3)
-        return false;
-
-    bool inside = false;
-
-    for (size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++)
-    {
-        const RealPoint pi = toRealPoint(ring[i]);
-        const RealPoint pj = toRealPoint(ring[j]);
-
-        if (onSegment(pj, pi, p))
-            return true;
-
-        const bool crosses =
-            ((pi.y > p.y) != (pj.y > p.y)) &&
-            (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x);
-
-        if (crosses)
-            inside = !inside;
-    }
-
-    return inside;
-}
-
-static bool pointInsidePolyArea(const RealPoint& p, const BoostPoly& poly)
-{
-    if (!pointInsideRing(p, poly.outer()))
-        return false;
-
-    for (size_t i = 0; i < poly.inners().size(); ++i)
-    {
-        if (pointInsideRing(p, poly.inners()[i]))
-            return false;
-    }
-
-    return true;
-}
-
-static long double distance2(const point& a, const point& b)
-{
-    const long double dx =
-        static_cast<long double>(a.x) - static_cast<long double>(b.x);
-    const long double dy =
-        static_cast<long double>(a.y) - static_cast<long double>(b.y);
-
-    return dx * dx + dy * dy;
-}
-
-static bool validBridge(
-    const BoostPoly& poly,
-    const BoostRing& currentPath,
-    size_t holeIndex,
-    const point& pathPoint,
-    const point& holePoint)
-{
-    if (samePoint(pathPoint, holePoint))
-        return false;
-
-    const RealPoint mid(
-        (static_cast<long double>(pathPoint.x) + static_cast<long double>(holePoint.x)) * 0.5L,
-        (static_cast<long double>(pathPoint.y) + static_cast<long double>(holePoint.y)) * 0.5L
-    );
-
-    if (!pointInsidePolyArea(mid, poly))
-        return false;
-
-    if (segmentHitsRingExceptAllowedEndpoints(
-            pathPoint,
-            holePoint,
-            poly.outer(),
-            pathPoint,
-            holePoint))
-        return false;
+    std::vector<HoleRayInfo> holes;
 
     for (size_t h = 0; h < poly.inners().size(); ++h)
     {
-        if (segmentHitsRingExceptAllowedEndpoints(
-                pathPoint,
-                holePoint,
-                poly.inners()[h],
-                pathPoint,
-                h == holeIndex ? holePoint : pathPoint))
-            return false;
+        BoostRing hole = poly.inners()[h];
+        removeDuplicatedLastPoint(hole);
+
+        if (hole.size() >= 3)
+            holes.push_back(makeHoleRayInfo(h, hole));
     }
 
-    if (segmentHitsRingExceptAllowedEndpoints(
-            pathPoint,
-            holePoint,
-            currentPath,
-            pathPoint,
-            holePoint))
+    std::sort(
+        holes.begin(),
+        holes.end(),
+        [](const HoleRayInfo& a, const HoleRayInfo& b)
+        {
+            if (a.anchor.x != b.anchor.x)
+                return a.anchor.x > b.anchor.x;
+
+            return a.anchor.y < b.anchor.y;
+        });
+
+    return holes;
+}
+
+static bool rayIntersectsSegmentToRight(
+    const point& rayStart,
+    const point& a,
+    const point& b,
+    long double& hitX)
+{
+    const long double y = static_cast<long double>(rayStart.y);
+    const long double ay = static_cast<long double>(a.y);
+    const long double by = static_cast<long double>(b.y);
+
+    // Half-open rule. Horizontal edges are ignored to avoid duplicate/overlap hits.
+    if ((ay > y) == (by > y))
         return false;
 
+    const long double ax = static_cast<long double>(a.x);
+    const long double bx = static_cast<long double>(b.x);
+    const long double x = ax + (y - ay) * (bx - ax) / (by - ay);
+
+    if (x <= static_cast<long double>(rayStart.x))
+        return false;
+
+    hitX = x;
     return true;
 }
 
-static void spliceHoleIntoPath(
+static bool findHorizontalRayHit(
+    BoostRing currentPath,
+    const point& rayStart,
+    RayHit& hit)
+{
+    removeDuplicatedLastPoint(currentPath);
+
+    if (currentPath.size() < 3)
+        return false;
+
+    bool found = false;
+    long double bestX = 0.0L;
+    size_t bestEdge = 0;
+
+    for (size_t i = 0; i < currentPath.size(); ++i)
+    {
+        const point& a = currentPath[i];
+        const point& b = currentPath[(i + 1) % currentPath.size()];
+
+        long double x = 0.0L;
+        if (!rayIntersectsSegmentToRight(rayStart, a, b, x))
+            continue;
+
+        if (!found || x < bestX)
+        {
+            found = true;
+            bestX = x;
+            bestEdge = i;
+        }
+    }
+
+    if (!found)
+        return false;
+
+    hit.edgeStartIndex = bestEdge;
+    hit.bridgePoint = point(roundToInt64(bestX), rayStart.y);
+    hit.x = bestX;
+    return true;
+}
+
+static void spliceHoleIntoPathByHorizontalBridge(
     BoostRing& currentPath,
-    size_t pathIndex,
+    const RayHit& hit,
     BoostRing hole,
-    size_t holeIndex)
+    size_t anchorIndex)
 {
     removeDuplicatedLastPoint(currentPath);
     removeDuplicatedLastPoint(hole);
 
     BoostRing merged;
 
-    for (size_t i = 0; i <= pathIndex; ++i)
-        merged.push_back(currentPath[i]);
+    for (size_t i = 0; i <= hit.edgeStartIndex; ++i)
+        pushPointNoDup(merged, currentPath[i]);
+
+    pushPointNoDup(merged, hit.bridgePoint);
 
     for (size_t i = 0; i < hole.size(); ++i)
-        merged.push_back(hole[(holeIndex + i) % hole.size()]);
+        pushPointNoDup(merged, hole[(anchorIndex + i) % hole.size()]);
 
-    merged.push_back(hole[holeIndex]);
-    merged.push_back(currentPath[pathIndex]);
+    pushPointNoDup(merged, hole[anchorIndex]);
+    pushPointNoDup(merged, hit.bridgePoint);
 
-    for (size_t i = pathIndex + 1; i < currentPath.size(); ++i)
-        merged.push_back(currentPath[i]);
+    for (size_t i = hit.edgeStartIndex + 1; i < currentPath.size(); ++i)
+        pushPointNoDup(merged, currentPath[i]);
 
     closeRing(merged);
     currentPath = merged;
@@ -683,54 +587,22 @@ static BoostRing makeSingleStrokePathForPoly(BoostPoly poly)
     if (path.size() < 3)
         return BoostRing();
 
-    std::vector<bool> connected(poly.inners().size(), false);
+    std::vector<HoleRayInfo> holes = sortedHolesForHorizontalBridge(poly);
 
-    for (size_t connectedCount = 0; connectedCount < poly.inners().size(); ++connectedCount)
+    for (size_t i = 0; i < holes.size(); ++i)
     {
-        bool found = false;
-        size_t bestHole = 0;
-        size_t bestPathIndex = 0;
-        size_t bestHoleIndex = 0;
-        long double bestDist = 0.0L;
+        const HoleRayInfo& holeInfo = holes[i];
 
-        for (size_t h = 0; h < poly.inners().size(); ++h)
-        {
-            if (connected[h])
-                continue;
+        RayHit hit;
+        if (!findHorizontalRayHit(path, holeInfo.anchor, hit))
+            throw std::runtime_error("failed to find a horizontal bridge target");
 
-            BoostRing hole = poly.inners()[h];
-            removeDuplicatedLastPoint(hole);
-
-            if (hole.size() < 3)
-                continue;
-
-            for (size_t pi = 0; pi < path.size(); ++pi)
-            {
-                for (size_t hi = 0; hi < hole.size(); ++hi)
-                {
-                    if (!validBridge(poly, path, h, path[pi], hole[hi]))
-                        continue;
-
-                    const long double d = distance2(path[pi], hole[hi]);
-
-                    if (!found || d < bestDist)
-                    {
-                        found = true;
-                        bestDist = d;
-                        bestHole = h;
-                        bestPathIndex = pi;
-                        bestHoleIndex = hi;
-                    }
-                }
-            }
-        }
-
-        if (!found)
-            throw std::runtime_error("failed to find a non-crossing bridge for a hole");
-
-        spliceHoleIntoPath(path, bestPathIndex, poly.inners()[bestHole], bestHoleIndex);
+        spliceHoleIntoPathByHorizontalBridge(
+            path,
+            hit,
+            poly.inners()[holeInfo.holeIndex],
+            holeInfo.anchorIndex);
         removeDuplicatedLastPoint(path);
-        connected[bestHole] = true;
     }
 
     closeRing(path);
@@ -1137,6 +1009,10 @@ int main()
     printMultiPoly(x, "XOR");
     printMultiPoly(d, "DIFF A-B");
     printMultiPoly(inter, "INTERSECTION");
+
+    // hole 2개를 오른쪽부터 수평 bridge로 연결하는 예시
+    std::vector<BoostRing> aStrokePaths = makeSingleStrokePaths(A);
+    printStrokePaths(aStrokePaths, "A TWO-HOLE SINGLE-STROKE PATHS");
 
     // Boolean 결과를 hole bridge가 포함된 한붓그리기 path로 변환
     std::vector<BoostRing> unionStrokePaths = makeSingleStrokePaths(u);
