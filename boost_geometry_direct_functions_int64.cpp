@@ -6,6 +6,7 @@
 // - Boolean: OR, XOR, DIFF, INTERSECTION
 // - Resize: Boost.Geometry buffer
 // - Hole 포함 contour flatten
+// - Boolean 결과를 rectClip 후 bridge 기반 한붓그리기 path로 변환
 // - RectClip:
 //   1) rectClipAccurate(): Boost intersection 기반, topology 보존
 //   2) rectClipRingFast(): Ring 단위 O(n) Sutherland-Hodgman
@@ -17,8 +18,9 @@
 //
 // 주의:
 // - Boost.Geometry는 outer + hole을 하나의 ring으로 자동 연결하지 않는다.
-// - 따라서 hole "한붓그리기"는 outer/hole contour를 순서대로 펼쳐서 순회하는 구조로 둔다.
-// - 진짜 하나의 closed path로 outer와 hole을 bridge 연결하려면 별도 bridge-cut 알고리즘이 필요하다.
+// - flattenContoursForStroke()는 outer/hole contour를 따로 순회한다.
+// - makeSingleStrokePaths()는 hole마다 bridge edge를 왕복 삽입해 하나의 closed walk를 만든다.
+// - bridge 후보는 outer/hole/current path와의 교차를 검사해 hole을 자르는 선을 피한다.
 
 #include <boost/geometry.hpp>
 #include <boost/geometry/geometries/register/point.hpp>
@@ -32,6 +34,7 @@
 #include <cmath>
 #include <iostream>
 #include <limits>
+#include <stdexcept>
 
 namespace bg = boost::geometry;
 
@@ -325,6 +328,8 @@ struct StrokeContour
     size_t holeIndex; // isHole == false면 0
 };
 
+static BoostMultiPoly rectClipAccurate(const BoostMultiPoly& input, Box clipBox);
+
 static std::vector<StrokeContour> flattenContoursForStroke(
     BoostMultiPoly mp)
 {
@@ -356,7 +361,382 @@ static std::vector<StrokeContour> flattenContoursForStroke(
 }
 
 // ============================================================
-// 7. Box -> BoostPoly
+// 7. Hole bridge: one-stroke closed walk
+// ============================================================
+//
+// flattenContoursForStroke()는 outer/hole을 따로 순회한다.
+// 아래 함수들은 하나의 polygon 안에서 outer와 모든 hole을 bridge edge로
+// 연결해 "한붓그리기용 closed walk" 하나를 만든다.
+//
+// 결과 path에는 bridge가 왕복으로 들어간다.
+//
+//   outer ... A -> H -> hole contour -> H -> A ... outer
+//
+// bridge 후보는 다음 조건을 통과해야 한다.
+// - bridge 중점이 polygon 내부이며 어떤 hole 내부도 아니어야 한다.
+// - bridge가 outer 경계, 다른 hole 경계, 이미 삽입된 path를 가로지르지 않아야 한다.
+// - endpoint에서 만나는 것은 허용한다.
+//
+// 일반 self-touching/복잡 polygon까지 완전히 처리하는 범용 triangulation은 아니지만,
+// EDA 직교 polygon/hole에서 "hole을 자르지 않는" bridge를 고르는 실용 버전이다.
+//
+
+struct RealPoint
+{
+    long double x;
+    long double y;
+
+    RealPoint() : x(0), y(0) {}
+    RealPoint(long double x_, long double y_) : x(x_), y(y_) {}
+};
+
+static bool sameRealPoint(const RealPoint& a, const RealPoint& b)
+{
+    const long double eps = 1e-12L;
+    return std::fabs(a.x - b.x) <= eps && std::fabs(a.y - b.y) <= eps;
+}
+
+static RealPoint toRealPoint(const point& p)
+{
+    return RealPoint(
+        static_cast<long double>(p.x),
+        static_cast<long double>(p.y)
+    );
+}
+
+static long double cross(
+    const RealPoint& a,
+    const RealPoint& b,
+    const RealPoint& c)
+{
+    return (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+}
+
+static bool onSegment(
+    const RealPoint& a,
+    const RealPoint& b,
+    const RealPoint& p)
+{
+    const long double eps = 1e-12L;
+
+    if (std::fabs(cross(a, b, p)) > eps)
+        return false;
+
+    return p.x >= std::min(a.x, b.x) - eps &&
+           p.x <= std::max(a.x, b.x) + eps &&
+           p.y >= std::min(a.y, b.y) - eps &&
+           p.y <= std::max(a.y, b.y) + eps;
+}
+
+static bool segmentsIntersect(
+    const RealPoint& a,
+    const RealPoint& b,
+    const RealPoint& c,
+    const RealPoint& d)
+{
+    const long double eps = 1e-12L;
+    const long double c1 = cross(a, b, c);
+    const long double c2 = cross(a, b, d);
+    const long double c3 = cross(c, d, a);
+    const long double c4 = cross(c, d, b);
+
+    if (((c1 > eps && c2 < -eps) || (c1 < -eps && c2 > eps)) &&
+        ((c3 > eps && c4 < -eps) || (c3 < -eps && c4 > eps)))
+        return true;
+
+    if (std::fabs(c1) <= eps && onSegment(a, b, c)) return true;
+    if (std::fabs(c2) <= eps && onSegment(a, b, d)) return true;
+    if (std::fabs(c3) <= eps && onSegment(c, d, a)) return true;
+    if (std::fabs(c4) <= eps && onSegment(c, d, b)) return true;
+
+    return false;
+}
+
+static bool intersectionIsOnlyAllowedEndpoint(
+    const RealPoint& bridgeA,
+    const RealPoint& bridgeB,
+    const RealPoint& edgeA,
+    const RealPoint& edgeB,
+    const RealPoint& allowedA,
+    const RealPoint& allowedB)
+{
+    const bool bridgeAAllowed =
+        sameRealPoint(bridgeA, allowedA) || sameRealPoint(bridgeA, allowedB);
+    const bool bridgeBAllowed =
+        sameRealPoint(bridgeB, allowedA) || sameRealPoint(bridgeB, allowedB);
+
+    if (bridgeAAllowed &&
+        (sameRealPoint(bridgeA, edgeA) || sameRealPoint(bridgeA, edgeB)))
+        return true;
+
+    if (bridgeBAllowed &&
+        (sameRealPoint(bridgeB, edgeA) || sameRealPoint(bridgeB, edgeB)))
+        return true;
+
+    return false;
+}
+
+static bool segmentHitsRingExceptAllowedEndpoints(
+    const point& a,
+    const point& b,
+    BoostRing ring,
+    const point& allowedA,
+    const point& allowedB)
+{
+    removeDuplicatedLastPoint(ring);
+
+    if (ring.size() < 2)
+        return false;
+
+    const RealPoint ba = toRealPoint(a);
+    const RealPoint bb = toRealPoint(b);
+    const RealPoint aa = toRealPoint(allowedA);
+    const RealPoint ab = toRealPoint(allowedB);
+
+    for (size_t i = 0; i < ring.size(); ++i)
+    {
+        const point& e0p = ring[i];
+        const point& e1p = ring[(i + 1) % ring.size()];
+
+        if (samePoint(e0p, e1p))
+            continue;
+
+        const RealPoint e0 = toRealPoint(e0p);
+        const RealPoint e1 = toRealPoint(e1p);
+
+        if (!segmentsIntersect(ba, bb, e0, e1))
+            continue;
+
+        if (intersectionIsOnlyAllowedEndpoint(ba, bb, e0, e1, aa, ab))
+            continue;
+
+        return true;
+    }
+
+    return false;
+}
+
+static bool pointInsideRing(const RealPoint& p, BoostRing ring)
+{
+    removeDuplicatedLastPoint(ring);
+
+    if (ring.size() < 3)
+        return false;
+
+    bool inside = false;
+
+    for (size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++)
+    {
+        const RealPoint pi = toRealPoint(ring[i]);
+        const RealPoint pj = toRealPoint(ring[j]);
+
+        if (onSegment(pj, pi, p))
+            return true;
+
+        const bool crosses =
+            ((pi.y > p.y) != (pj.y > p.y)) &&
+            (p.x < (pj.x - pi.x) * (p.y - pi.y) / (pj.y - pi.y) + pi.x);
+
+        if (crosses)
+            inside = !inside;
+    }
+
+    return inside;
+}
+
+static bool pointInsidePolyArea(const RealPoint& p, const BoostPoly& poly)
+{
+    if (!pointInsideRing(p, poly.outer()))
+        return false;
+
+    for (size_t i = 0; i < poly.inners().size(); ++i)
+    {
+        if (pointInsideRing(p, poly.inners()[i]))
+            return false;
+    }
+
+    return true;
+}
+
+static long double distance2(const point& a, const point& b)
+{
+    const long double dx =
+        static_cast<long double>(a.x) - static_cast<long double>(b.x);
+    const long double dy =
+        static_cast<long double>(a.y) - static_cast<long double>(b.y);
+
+    return dx * dx + dy * dy;
+}
+
+static bool validBridge(
+    const BoostPoly& poly,
+    const BoostRing& currentPath,
+    size_t holeIndex,
+    const point& pathPoint,
+    const point& holePoint)
+{
+    if (samePoint(pathPoint, holePoint))
+        return false;
+
+    const RealPoint mid(
+        (static_cast<long double>(pathPoint.x) + static_cast<long double>(holePoint.x)) * 0.5L,
+        (static_cast<long double>(pathPoint.y) + static_cast<long double>(holePoint.y)) * 0.5L
+    );
+
+    if (!pointInsidePolyArea(mid, poly))
+        return false;
+
+    if (segmentHitsRingExceptAllowedEndpoints(
+            pathPoint,
+            holePoint,
+            poly.outer(),
+            pathPoint,
+            holePoint))
+        return false;
+
+    for (size_t h = 0; h < poly.inners().size(); ++h)
+    {
+        if (segmentHitsRingExceptAllowedEndpoints(
+                pathPoint,
+                holePoint,
+                poly.inners()[h],
+                pathPoint,
+                h == holeIndex ? holePoint : pathPoint))
+            return false;
+    }
+
+    if (segmentHitsRingExceptAllowedEndpoints(
+            pathPoint,
+            holePoint,
+            currentPath,
+            pathPoint,
+            holePoint))
+        return false;
+
+    return true;
+}
+
+static void spliceHoleIntoPath(
+    BoostRing& currentPath,
+    size_t pathIndex,
+    BoostRing hole,
+    size_t holeIndex)
+{
+    removeDuplicatedLastPoint(currentPath);
+    removeDuplicatedLastPoint(hole);
+
+    BoostRing merged;
+
+    for (size_t i = 0; i <= pathIndex; ++i)
+        merged.push_back(currentPath[i]);
+
+    for (size_t i = 0; i < hole.size(); ++i)
+        merged.push_back(hole[(holeIndex + i) % hole.size()]);
+
+    merged.push_back(hole[holeIndex]);
+    merged.push_back(currentPath[pathIndex]);
+
+    for (size_t i = pathIndex + 1; i < currentPath.size(); ++i)
+        merged.push_back(currentPath[i]);
+
+    closeRing(merged);
+    currentPath = merged;
+}
+
+static BoostRing makeSingleStrokePathForPoly(BoostPoly poly)
+{
+    normalizeBoostPoly(poly);
+
+    BoostRing path = poly.outer();
+    removeDuplicatedLastPoint(path);
+
+    if (path.size() < 3)
+        return BoostRing();
+
+    std::vector<bool> connected(poly.inners().size(), false);
+
+    for (size_t connectedCount = 0; connectedCount < poly.inners().size(); ++connectedCount)
+    {
+        bool found = false;
+        size_t bestHole = 0;
+        size_t bestPathIndex = 0;
+        size_t bestHoleIndex = 0;
+        long double bestDist = 0.0L;
+
+        for (size_t h = 0; h < poly.inners().size(); ++h)
+        {
+            if (connected[h])
+                continue;
+
+            BoostRing hole = poly.inners()[h];
+            removeDuplicatedLastPoint(hole);
+
+            if (hole.size() < 3)
+                continue;
+
+            for (size_t pi = 0; pi < path.size(); ++pi)
+            {
+                for (size_t hi = 0; hi < hole.size(); ++hi)
+                {
+                    if (!validBridge(poly, path, h, path[pi], hole[hi]))
+                        continue;
+
+                    const long double d = distance2(path[pi], hole[hi]);
+
+                    if (!found || d < bestDist)
+                    {
+                        found = true;
+                        bestDist = d;
+                        bestHole = h;
+                        bestPathIndex = pi;
+                        bestHoleIndex = hi;
+                    }
+                }
+            }
+        }
+
+        if (!found)
+            throw std::runtime_error("failed to find a non-crossing bridge for a hole");
+
+        spliceHoleIntoPath(path, bestPathIndex, poly.inners()[bestHole], bestHoleIndex);
+        removeDuplicatedLastPoint(path);
+        connected[bestHole] = true;
+    }
+
+    closeRing(path);
+    return path;
+}
+
+static std::vector<BoostRing> makeSingleStrokePaths(BoostMultiPoly mp)
+{
+    normalizeBoostMultiPoly(mp);
+
+    std::vector<BoostRing> out;
+
+    for (size_t i = 0; i < mp.size(); ++i)
+    {
+        BoostRing path = makeSingleStrokePathForPoly(mp[i]);
+
+        if (path.size() >= 4)
+            out.push_back(path);
+    }
+
+    return out;
+}
+
+static std::vector<BoostRing> booleanRectClipSingleStrokePaths(
+    const BoostMultiPoly& a,
+    const BoostMultiPoly& b,
+    BoolOp op,
+    Box clipBox)
+{
+    BoostMultiPoly booleanResult = booleanOp(a, b, op);
+    BoostMultiPoly clippedResult = rectClipAccurate(booleanResult, clipBox);
+    return makeSingleStrokePaths(clippedResult);
+}
+
+// ============================================================
+// 8. Box -> BoostPoly
 // ============================================================
 //
 // Boost.Geometry box 타입을 따로 쓰지 않고,
@@ -388,7 +768,7 @@ static BoostMultiPoly makeBoxMultiPoly(Box box)
 }
 
 // ============================================================
-// 8. RectClip - accurate version
+// 9. RectClip - accurate version
 // ============================================================
 //
 // polygon/hole topology를 정확히 유지해야 하면 이 함수 권장.
@@ -404,7 +784,7 @@ static BoostMultiPoly rectClipAccurate(
 }
 
 // ============================================================
-// 9. RectClip - fast ring O(n) version
+// 10. RectClip - fast ring O(n) version
 // ============================================================
 //
 // 단일 BoostRing을 Box로 빠르게 clip한다.
@@ -610,7 +990,7 @@ static std::vector<StrokeContour> rectClipFlattenContoursFast(
 }
 
 // ============================================================
-// 10. Optional: rect clip outer only, no hole topology rebuild
+// 11. Optional: rect clip outer only, no hole topology rebuild
 // ============================================================
 //
 // 이 함수는 BoostPoly의 outer와 inner를 각각 fast clip한다.
@@ -628,7 +1008,7 @@ static std::vector<StrokeContour> rectClipPolyContoursFast(
 }
 
 // ============================================================
-// 11. Print helpers
+// 12. Print helpers
 // ============================================================
 
 static void printRing(const BoostRing& ring)
@@ -659,8 +1039,20 @@ static void printMultiPoly(const BoostMultiPoly& mp, const char* title)
     }
 }
 
+static void printStrokePaths(const std::vector<BoostRing>& paths, const char* title)
+{
+    std::cout << "\n=== " << title << " ===\n";
+    std::cout << "path count = " << paths.size() << "\n";
+
+    for (size_t i = 0; i < paths.size(); ++i)
+    {
+        std::cout << "path[" << i << "]:\n";
+        printRing(paths[i]);
+    }
+}
+
 // ============================================================
-// 12. Example
+// 13. Example
 // ============================================================
 
 int main()
@@ -674,14 +1066,22 @@ int main()
     polyA.outer().push_back(point(0, 100));
     polyA.outer().push_back(point(0, 0));
 
-    BoostRing holeA;
-    holeA.push_back(point(40, 40));
-    holeA.push_back(point(60, 40));
-    holeA.push_back(point(60, 60));
-    holeA.push_back(point(40, 60));
-    holeA.push_back(point(40, 40));
+    BoostRing holeA0;
+    holeA0.push_back(point(20, 20));
+    holeA0.push_back(point(35, 20));
+    holeA0.push_back(point(35, 35));
+    holeA0.push_back(point(20, 35));
+    holeA0.push_back(point(20, 20));
 
-    polyA.inners().push_back(holeA);
+    BoostRing holeA1;
+    holeA1.push_back(point(65, 65));
+    holeA1.push_back(point(80, 65));
+    holeA1.push_back(point(80, 80));
+    holeA1.push_back(point(65, 80));
+    holeA1.push_back(point(65, 65));
+
+    polyA.inners().push_back(holeA0);
+    polyA.inners().push_back(holeA1);
     normalizeBoostPoly(polyA);
 
     BoostMultiPoly A;
@@ -691,7 +1091,7 @@ int main()
     // B: 50,50 ~ 150,150 사각형
     BoostMultiPoly B = makeBoxMultiPoly(Box(50, 50, 150, 150));
 
-    // Boolean
+    // Boolean 결과
     BoostMultiPoly u = booleanUnion(A, B);
     BoostMultiPoly x = booleanXor(A, B);
     BoostMultiPoly d = booleanDiff(A, B);
@@ -702,6 +1102,10 @@ int main()
     printMultiPoly(d, "DIFF A-B");
     printMultiPoly(inter, "INTERSECTION");
 
+    // Boolean 결과를 hole bridge가 포함된 한붓그리기 path로 변환
+    std::vector<BoostRing> unionStrokePaths = makeSingleStrokePaths(u);
+    printStrokePaths(unionStrokePaths, "UNION SINGLE-STROKE PATHS");
+
     // Resize
     BoostMultiPoly grown = resizePoly(A, 5.0, 5.0);
     BoostMultiPoly shrunk = resizePoly(A, -5.0, 5.0);
@@ -709,7 +1113,7 @@ int main()
     printMultiPoly(grown, "RESIZE +5");
     printMultiPoly(shrunk, "RESIZE -5");
 
-    // Hole 포함 contour flatten
+    // 기존 방식: outer/hole contour 분리 순회
     std::vector<StrokeContour> contours = flattenContoursForStroke(A);
 
     std::cout << "\n=== FLATTEN CONTOURS ===\n";
@@ -724,11 +1128,16 @@ int main()
         printRing(contours[c].ring);
     }
 
-    // RectClip 정확한 버전
+    // RectClip 정확한 버전: Boolean 결과를 먼저 정확히 clip
     Box clipBox(25, 25, 75, 75);
 
-    BoostMultiPoly clippedAccurate = rectClipAccurate(A, clipBox);
-    printMultiPoly(clippedAccurate, "RECT CLIP ACCURATE");
+    BoostMultiPoly clippedAccurate = rectClipAccurate(u, clipBox);
+    printMultiPoly(clippedAccurate, "UNION RECT CLIP ACCURATE");
+
+    // 목표 흐름: Boolean -> RectClip -> 한붓그리기 path
+    std::vector<BoostRing> clippedStrokePaths =
+        booleanRectClipSingleStrokePaths(A, B, BoolOp::UnionOp, clipBox);
+    printStrokePaths(clippedStrokePaths, "UNION RECTCLIP SINGLE-STROKE PATHS");
 
     // RectClip 빠른 contour 버전
     std::vector<StrokeContour> clippedContours =
