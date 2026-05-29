@@ -261,16 +261,46 @@ static BoostMultiPoly booleanIntersection(
     return booleanOp(a, b, BoolOp::IntersectionOp);
 }
 
+static BoostMultiPoly dissolveOverlaps(BoostMultiPoly input)
+{
+    normalizeBoostMultiPoly(input);
+
+    BoostMultiPoly result;
+
+    for (size_t i = 0; i < input.size(); ++i)
+    {
+        BoostMultiPoly single;
+        single.push_back(input[i]);
+        normalizeBoostMultiPoly(single);
+
+        if (result.empty())
+        {
+            result = single;
+            continue;
+        }
+
+        BoostMultiPoly merged;
+        bg::union_(result, single, merged);
+        normalizeBoostMultiPoly(merged);
+        result = merged;
+    }
+
+    normalizeBoostMultiPoly(result);
+    return result;
+}
+
 // ============================================================
 // 5. Resize / Offset
 // ============================================================
 //
-// Boost.Geometry buffer를 BoostMultiPoly에 직접 적용한다.
+// 겹치는 polygon을 먼저 union으로 녹인 뒤 Boost.Geometry buffer를 적용한다.
 //
 // delta > 0 : 확장
 // delta < 0 : 축소
 //
 // 주의:
+// - 서로 겹치는 polygon을 그대로 shrink하면 각 polygon이 따로 줄어들어 틈/조각이 생길 수 있다.
+// - resize 전에 dissolveOverlaps()로 면을 먼저 정리해야 "겹친 도형 전체" 기준으로 줄어든다.
 // - point 좌표 타입이 int64_t라서 buffer 결과가 정수 좌표로 들어간다.
 // - 대각선, miter, round 계열에서는 내부 계산 결과가 정수가 아닐 수 있다.
 // - EDA DBU 목적이면 보통 이 방식도 실용적이지만,
@@ -282,7 +312,7 @@ static BoostMultiPoly resizePoly(
     double delta,
     double miterLimit = 5.0)
 {
-    normalizeBoostMultiPoly(input);
+    BoostMultiPoly cleanInput = dissolveOverlaps(input);
 
     BoostMultiPoly result;
 
@@ -299,7 +329,7 @@ static BoostMultiPoly resizePoly(
     bs::point_square pointStrategy;
 
     bg::buffer(
-        input,
+        cleanInput,
         result,
         distanceStrategy,
         sideStrategy,
@@ -1091,6 +1121,12 @@ int main()
     // B: 50,50 ~ 150,150 사각형
     BoostMultiPoly B = makeBoxMultiPoly(Box(50, 50, 150, 150));
 
+    // 서로 겹치는 도형. resizePoly()는 내부에서 먼저 dissolveOverlaps()를 수행한다.
+    BoostMultiPoly overlapped;
+    overlapped.push_back(makeBoxPoly(Box(0, 0, 80, 80)));
+    overlapped.push_back(makeBoxPoly(Box(40, 40, 120, 120)));
+    normalizeBoostMultiPoly(overlapped);
+
     // Boolean 결과
     BoostMultiPoly u = booleanUnion(A, B);
     BoostMultiPoly x = booleanXor(A, B);
@@ -1109,9 +1145,11 @@ int main()
     // Resize
     BoostMultiPoly grown = resizePoly(A, 5.0, 5.0);
     BoostMultiPoly shrunk = resizePoly(A, -5.0, 5.0);
+    BoostMultiPoly overlappedShrunk = resizePoly(overlapped, -10.0, 5.0);
 
     printMultiPoly(grown, "RESIZE +5");
     printMultiPoly(shrunk, "RESIZE -5");
+    printMultiPoly(overlappedShrunk, "OVERLAPPED RESIZE -10");
 
     // 기존 방식: outer/hole contour 분리 순회
     std::vector<StrokeContour> contours = flattenContoursForStroke(A);
