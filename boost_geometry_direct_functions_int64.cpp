@@ -7,6 +7,7 @@
 // - Resize: Boost.Geometry buffer
 // - Hole 포함 contour flatten
 // - Boolean 결과를 rectClip 후 bridge 기반 한붓그리기 path로 변환
+// - BoostRing vertex count limit split
 // - RectClip:
 //   1) rectClipAccurate(): Boost intersection 기반, topology 보존
 //   2) rectClipRingFast(): Ring 단위 O(n) Sutherland-Hodgman
@@ -910,7 +911,215 @@ static std::vector<StrokeContour> rectClipPolyContoursFast(
 }
 
 // ============================================================
-// 12. Print helpers
+// 12. BoostRing vertex count limit splitter
+// ============================================================
+//
+// contour/path export용 분할 함수다.
+// 정확한 polygon topology/면적 분할이 필요하면 이 방식 대신 box/grid clip을 사용한다.
+//
+
+static point calcAveragePoint(const BoostRing& input)
+{
+    BoostRing ring = input;
+    removeDuplicatedLastPoint(ring);
+
+    if (ring.empty())
+        return point(0, 0);
+
+    long double sx = 0.0L;
+    long double sy = 0.0L;
+
+    for (size_t i = 0; i < ring.size(); ++i)
+    {
+        sx += static_cast<long double>(ring[i].x);
+        sy += static_cast<long double>(ring[i].y);
+    }
+
+    const long double n = static_cast<long double>(ring.size());
+
+    return point(
+        roundToInt64(sx / n),
+        roundToInt64(sy / n)
+    );
+}
+
+static void matchOrientation(BoostRing& ring, long double originalArea2)
+{
+    const long double a = signedArea2(ring);
+
+    if ((originalArea2 > 0.0L && a < 0.0L) ||
+        (originalArea2 < 0.0L && a > 0.0L))
+    {
+        reverseRing(ring);
+    }
+}
+
+static std::vector<BoostRing> splitBoostRingByVertexLimitFan(
+    BoostRing input,
+    size_t maxVertexCount)
+{
+    std::vector<BoostRing> result;
+
+    removeDuplicatedLastPoint(input);
+
+    if (input.size() < 3)
+        return result;
+
+    if (maxVertexCount < 4)
+        maxVertexCount = 4;
+
+    if (input.size() + 1 <= maxVertexCount)
+    {
+        closeRing(input);
+        result.push_back(input);
+        return result;
+    }
+
+    const long double originalArea = signedArea2(input);
+    const point center = calcAveragePoint(input);
+    const size_t maxOriginalPerPiece = maxVertexCount - 2;
+
+    if (maxOriginalPerPiece < 2)
+        return result;
+
+    const size_t n = input.size();
+    size_t start = 0;
+
+    while (start < n)
+    {
+        const size_t remain = n - start;
+
+        if (remain == 1)
+        {
+            BoostRing piece;
+            piece.push_back(input[start]);
+            piece.push_back(input[0]);
+            piece.push_back(center);
+            closeRing(piece);
+            matchOrientation(piece, originalArea);
+
+            if (piece.size() <= maxVertexCount)
+                result.push_back(piece);
+
+            break;
+        }
+
+        size_t count = std::min(maxOriginalPerPiece, remain);
+
+        if (remain > count && remain - count == 1)
+        {
+            if (count > 2)
+                --count;
+        }
+
+        BoostRing piece;
+
+        for (size_t i = 0; i < count; ++i)
+            piece.push_back(input[start + i]);
+
+        if (start + count < n)
+        {
+            if (piece.size() + 3 <= maxVertexCount)
+                piece.push_back(input[start + count]);
+        }
+        else
+        {
+            if (piece.size() + 3 <= maxVertexCount)
+                piece.push_back(input[0]);
+        }
+
+        piece.push_back(center);
+        closeRing(piece);
+
+        BoostRing check = piece;
+        removeDuplicatedLastPoint(check);
+
+        if (check.size() >= 3)
+        {
+            matchOrientation(piece, originalArea);
+
+            if (piece.size() <= maxVertexCount)
+                result.push_back(piece);
+        }
+
+        start += count;
+    }
+
+    return result;
+}
+
+static std::vector<BoostRing> splitBoostRingByVertexLimitChunk(
+    BoostRing input,
+    size_t maxVertexCount)
+{
+    std::vector<BoostRing> result;
+
+    removeDuplicatedLastPoint(input);
+
+    if (input.size() < 3)
+        return result;
+
+    if (maxVertexCount < 4)
+        maxVertexCount = 4;
+
+    if (input.size() + 1 <= maxVertexCount)
+    {
+        closeRing(input);
+        result.push_back(input);
+        return result;
+    }
+
+    const long double originalArea = signedArea2(input);
+    const size_t maxOpenVertexCount = maxVertexCount - 1;
+
+    if (maxOpenVertexCount < 3)
+        return result;
+
+    const size_t n = input.size();
+    size_t start = 0;
+
+    while (start < n)
+    {
+        const size_t remain = n - start;
+        size_t count = std::min(maxOpenVertexCount, remain);
+        size_t begin = start;
+
+        if (remain < 3)
+        {
+            const size_t need = 3 - remain;
+
+            if (start < need)
+                break;
+
+            begin = start - need;
+            count = 3;
+        }
+
+        BoostRing piece;
+
+        for (size_t i = 0; i < count; ++i)
+            piece.push_back(input[begin + i]);
+
+        if (piece.size() >= 3)
+        {
+            closeRing(piece);
+            matchOrientation(piece, originalArea);
+
+            if (piece.size() <= maxVertexCount)
+                result.push_back(piece);
+        }
+
+        if (remain < 3)
+            break;
+
+        start += count;
+    }
+
+    return result;
+}
+
+// ============================================================
+// 13. Print helpers
 // ============================================================
 
 static void printRing(const BoostRing& ring)
@@ -954,7 +1163,7 @@ static void printStrokePaths(const std::vector<BoostRing>& paths, const char* ti
 }
 
 // ============================================================
-// 13. Example
+// 14. Example
 // ============================================================
 
 int main()
@@ -1013,6 +1222,17 @@ int main()
     // hole 2개를 오른쪽부터 수평 bridge로 연결하는 예시
     std::vector<BoostRing> aStrokePaths = makeSingleStrokePaths(A);
     printStrokePaths(aStrokePaths, "A TWO-HOLE SINGLE-STROKE PATHS");
+
+    if (!aStrokePaths.empty())
+    {
+        std::vector<BoostRing> fanPieces =
+            splitBoostRingByVertexLimitFan(aStrokePaths[0], 8);
+        printStrokePaths(fanPieces, "A SINGLE-STROKE FAN SPLIT LIMIT 8");
+
+        std::vector<BoostRing> chunkPieces =
+            splitBoostRingByVertexLimitChunk(aStrokePaths[0], 8);
+        printStrokePaths(chunkPieces, "A SINGLE-STROKE CHUNK SPLIT LIMIT 8");
+    }
 
     // Boolean 결과를 hole bridge가 포함된 한붓그리기 path로 변환
     std::vector<BoostRing> unionStrokePaths = makeSingleStrokePaths(u);
