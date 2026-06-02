@@ -1,4 +1,4 @@
-// BoostMultiPoly vertex limit splitter by vertical/horizontal box cut
+// BoostRing vertex limit splitter by vertical/horizontal box cut
 // C++11
 //
 // 전제:
@@ -13,14 +13,14 @@
 // typedef boost::geometry::model::multi_polygon<BoostPoly> BoostMultiPoly;
 //
 // 목적:
-// - BoostMultiPoly를 수직/수평 Box intersection으로 분할
-// - 각 결과 BoostPoly의 outer + holes 총 정점 수가 maxVertexCount 이하가 되도록 반복
-// - Fan split / Chunk split보다 polygon 면적 의미를 훨씬 잘 보존
+// - 단일 BoostRing을 수직/수평 Box intersection으로 분할
+// - 각 결과 BoostRing의 정점 수가 maxVertexCount 이하가 되도록 반복
+// - 결과 타입은 std::vector<BoostRing>
 //
 // 주의:
-// - Boost.Geometry에는 unary dissolve/merge가 없으므로 입력이 겹친 multi polygon이면
-//   먼저 mergeSelf() 같은 누적 union으로 정리한 뒤 이 함수를 쓰는 것을 권장.
-// - 너무 복잡한 도형은 maxDepth 제한까지 가도 vertex limit 이하가 안 될 수 있음.
+// - 입력 ring은 simple closed contour라고 가정한다.
+// - hole이 있는 polygon은 outer/hole을 BoostRing으로 flatten하기 전에 polygon 단위로
+//   처리해야 topology 손실이 없다.
 // - split line이 정점/edge와 정확히 겹치면 Boost overlay가 예민할 수 있으므로,
 //   필요하면 split 좌표를 1 DBU 정도 shift하는 전략을 추가할 수 있음.
 
@@ -32,7 +32,6 @@
 
 #include <algorithm>
 #include <cstdint>
-#include <iostream>
 #include <vector>
 
 namespace bg = boost::geometry;
@@ -60,6 +59,42 @@ static void normalizeBox(Box& b)
         std::swap(b.minY, b.maxY);
 }
 
+static size_t ringVertexCount(const BoostRing& ring)
+{
+    if (ring.empty())
+        return 0;
+
+    // closed ring이면 마지막 중복점은 제외하고 카운트한다.
+    if (ring.size() >= 2 && samePoint(ring.front(), ring.back()))
+        return ring.size() - 1;
+
+    return ring.size();
+}
+
+static bool isValidOutputRing(const BoostRing& ring)
+{
+    return ringVertexCount(ring) >= 3;
+}
+
+static BoostPoly makePolyFromRing(BoostRing ring)
+{
+    closeRing(ring);
+
+    BoostPoly p;
+    p.outer() = ring;
+
+    bg::correct(p);
+    return p;
+}
+
+static BoostMultiPoly makeMultiPolyFromRing(BoostRing ring)
+{
+    BoostMultiPoly mp;
+    mp.push_back(makePolyFromRing(ring));
+    bg::correct(mp);
+    return mp;
+}
+
 static BoostPoly makeBoxPoly(Box box)
 {
     normalizeBox(box);
@@ -84,26 +119,44 @@ static BoostMultiPoly makeBoxMultiPoly(Box box)
     return mp;
 }
 
-static BoostMultiPoly rectClipAccurate(
-    const BoostMultiPoly& input,
-    Box clipBox)
+static void appendOuterRings(
+    std::vector<BoostRing>& out,
+    const BoostMultiPoly& mp)
 {
-    BoostMultiPoly in = input;
-    bg::correct(in);
+    for (size_t i = 0; i < mp.size(); ++i)
+    {
+        BoostRing ring = mp[i].outer();
+        closeRing(ring);
 
-    BoostMultiPoly boxMp = makeBoxMultiPoly(clipBox);
-
-    BoostMultiPoly out;
-    bg::intersection(in, boxMp, out);
-    bg::correct(out);
-
-    return out;
+        if (isValidOutputRing(ring))
+            out.push_back(ring);
+    }
 }
 
-static Box getEnvelopeBox(const BoostMultiPoly& mp)
+static std::vector<BoostRing> rectClipRingAccurate(
+    const BoostRing& input,
+    Box clipBox)
+{
+    std::vector<BoostRing> rings;
+
+    if (!isValidOutputRing(input))
+        return rings;
+
+    BoostMultiPoly in = makeMultiPolyFromRing(input);
+    BoostMultiPoly boxMp = makeBoxMultiPoly(clipBox);
+
+    BoostMultiPoly clipped;
+    bg::intersection(in, boxMp, clipped);
+    bg::correct(clipped);
+
+    appendOuterRings(rings, clipped);
+    return rings;
+}
+
+static Box getEnvelopeBox(const BoostRing& ring)
 {
     bg::model::box<point> b;
-    bg::envelope(mp, b);
+    bg::envelope(ring, b);
 
     Box out;
     out.minX = bg::get<bg::min_corner, 0>(b);
@@ -115,64 +168,11 @@ static Box getEnvelopeBox(const BoostMultiPoly& mp)
     return out;
 }
 
-static size_t ringVertexCount(const BoostRing& ring)
-{
-    if (ring.empty())
-        return 0;
-
-    // closed ring이면 마지막 중복점을 제외하고 카운트하고 싶으면 -1
-    if (ring.size() >= 2 && samePoint(ring.front(), ring.back()))
-        return ring.size() - 1;
-
-    return ring.size();
-}
-
-static size_t polyVertexCount(const BoostPoly& poly)
-{
-    size_t count = 0;
-
-    count += ringVertexCount(poly.outer());
-
-    for (size_t i = 0; i < poly.inners().size(); ++i)
-        count += ringVertexCount(poly.inners()[i]);
-
-    return count;
-}
-
-static size_t multiPolyMaxPolyVertexCount(const BoostMultiPoly& mp)
-{
-    size_t maxCount = 0;
-
-    for (size_t i = 0; i < mp.size(); ++i)
-        maxCount = std::max(maxCount, polyVertexCount(mp[i]));
-
-    return maxCount;
-}
-
 static bool isWithinVertexLimit(
-    const BoostMultiPoly& mp,
+    const BoostRing& ring,
     size_t maxVertexCount)
 {
-    for (size_t i = 0; i < mp.size(); ++i)
-    {
-        if (polyVertexCount(mp[i]) > maxVertexCount)
-            return false;
-    }
-
-    return true;
-}
-
-static bool isEmptyGeometry(const BoostMultiPoly& mp)
-{
-    return mp.empty();
-}
-
-static void appendNonEmpty(
-    std::vector<BoostMultiPoly>& out,
-    const BoostMultiPoly& mp)
-{
-    if (!isEmptyGeometry(mp))
-        out.push_back(mp);
+    return ringVertexCount(ring) <= maxVertexCount;
 }
 
 static bool canSplitBox(const Box& box)
@@ -250,37 +250,38 @@ static bool splitBoxByLongAxis(
 }
 
 static void splitByVertexLimitRecursive(
-    const BoostMultiPoly& input,
+    const BoostRing& input,
     size_t maxVertexCount,
     int depth,
     int maxDepth,
-    std::vector<BoostMultiPoly>& out)
+    std::vector<BoostRing>& out)
 {
-    if (input.empty())
+    if (!isValidOutputRing(input))
         return;
 
-    BoostMultiPoly mp = input;
-    bg::correct(mp);
+    BoostRing ring = input;
+    closeRing(ring);
+    bg::correct(ring);
 
-    if (isWithinVertexLimit(mp, maxVertexCount))
+    if (isWithinVertexLimit(ring, maxVertexCount))
     {
-        out.push_back(mp);
+        out.push_back(ring);
         return;
     }
 
     if (depth >= maxDepth)
     {
         // 더 이상 자르지 않고 반환.
-        // 이 경우 일부 polygon은 maxVertexCount를 초과할 수 있다.
-        out.push_back(mp);
+        // 이 경우 일부 ring은 maxVertexCount를 초과할 수 있다.
+        out.push_back(ring);
         return;
     }
 
-    Box env = getEnvelopeBox(mp);
+    Box env = getEnvelopeBox(ring);
 
     if (!canSplitBox(env))
     {
-        out.push_back(mp);
+        out.push_back(ring);
         return;
     }
 
@@ -289,37 +290,38 @@ static void splitByVertexLimitRecursive(
 
     if (!splitBoxByLongAxis(env, boxA, boxB))
     {
-        out.push_back(mp);
+        out.push_back(ring);
         return;
     }
 
-    BoostMultiPoly partA = rectClipAccurate(mp, boxA);
-    BoostMultiPoly partB = rectClipAccurate(mp, boxB);
+    std::vector<BoostRing> partA = rectClipRingAccurate(ring, boxA);
+    std::vector<BoostRing> partB = rectClipRingAccurate(ring, boxB);
 
-    // 분할했는데 한쪽이 비거나, 둘 다 원본과 거의 같은 식으로 안 잘리면 무한 루프 방지
+    // overlay 실패나 퇴화 케이스에서 무한 재귀를 피한다.
     if (partA.empty() && partB.empty())
         return;
 
-    if (!partA.empty())
-        splitByVertexLimitRecursive(partA, maxVertexCount, depth + 1, maxDepth, out);
+    for (size_t i = 0; i < partA.size(); ++i)
+        splitByVertexLimitRecursive(partA[i], maxVertexCount, depth + 1, maxDepth, out);
 
-    if (!partB.empty())
-        splitByVertexLimitRecursive(partB, maxVertexCount, depth + 1, maxDepth, out);
+    for (size_t i = 0; i < partB.size(); ++i)
+        splitByVertexLimitRecursive(partB[i], maxVertexCount, depth + 1, maxDepth, out);
 }
 
 // 메인 함수.
-// 결과는 여러 BoostMultiPoly 조각으로 반환.
-// 각 조각은 box intersection 결과라 polygon topology가 유지된다.
-static std::vector<BoostMultiPoly> splitBoostMultiPolyByVertexLimitVH(
-    BoostMultiPoly input,
+// 입력 BoostRing을 box intersection으로 반복 분할한다.
+// maxVertexCount는 closed ring의 마지막 중복점을 제외한 unique vertex 기준이다.
+static std::vector<BoostRing> splitBoostRingByVertexLimitVH(
+    BoostRing input,
     size_t maxVertexCount,
     int maxDepth = 32)
 {
-    std::vector<BoostMultiPoly> out;
+    std::vector<BoostRing> out;
 
-    if (maxVertexCount < 4)
-        maxVertexCount = 4;
+    if (maxVertexCount < 3)
+        maxVertexCount = 3;
 
+    closeRing(input);
     bg::correct(input);
 
     splitByVertexLimitRecursive(
@@ -332,37 +334,16 @@ static std::vector<BoostMultiPoly> splitBoostMultiPolyByVertexLimitVH(
     return out;
 }
 
-// 결과를 하나의 BoostMultiPoly로 합쳐 받고 싶을 때.
-// 단, 조각들이 서로 edge를 공유할 수 있으므로,
-// 다시 union하면 원래대로 merge될 수 있다.
-// export용이면 vector<BoostMultiPoly> 그대로 쓰는 것을 권장.
-static BoostMultiPoly flattenSplitResult(
-    const std::vector<BoostMultiPoly>& pieces)
-{
-    BoostMultiPoly out;
-
-    for (size_t i = 0; i < pieces.size(); ++i)
-    {
-        for (size_t j = 0; j < pieces[i].size(); ++j)
-            out.push_back(pieces[i][j]);
-    }
-
-    bg::correct(out);
-    return out;
-}
-
 // 사용 예:
 //
-// BoostMultiPoly input = ...;
+// BoostRing input = ...;
 //
 // size_t limit = 200;
 //
-// std::vector<BoostMultiPoly> pieces =
-//     splitBoostMultiPolyByVertexLimitVH(input, limit, 32);
+// std::vector<BoostRing> pieces =
+//     splitBoostRingByVertexLimitVH(input, limit, 32);
 //
 // for (size_t i = 0; i < pieces.size(); ++i)
 // {
 //     // pieces[i]를 각각 export / 처리
 // }
-//
-// BoostMultiPoly flat = flattenSplitResult(pieces);
