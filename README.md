@@ -13,6 +13,7 @@ HAHAHA
 - classifies polygons as `Polygon90`, `Polygon45`, or `AnyAngle`
 - runs Boolean `OR`, `AND`, `SUB`, `XOR`
 - runs size up/down through Boost.Polygon `resize()`
+- returns fractured no-hole polygons only
 
 Build:
 

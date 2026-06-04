@@ -7,6 +7,7 @@
 // - Chooses Boost.Polygon's polygon_90_set_data, polygon_45_set_data, or
 //   polygon_set_data based on that classification.
 // - Supports Boolean OR, AND, SUB, XOR and size up/down via resize().
+// - Returns fractured no-hole polygons only.
 //
 // Build:
 //   c++ -std=c++11 boost_polygon_custom_point_ops.cpp -o boost_polygon_custom_point_ops
@@ -116,6 +117,7 @@ namespace bp = boost::polygon;
 typedef bp::polygon_90_with_holes_data<Coord> BoostPolygon90;
 typedef bp::polygon_45_with_holes_data<Coord> BoostPolygon45;
 typedef bp::polygon_with_holes_data<Coord> BoostPolygonAny;
+typedef bp::polygon_data<Coord> BoostNoHolePolygon;
 typedef bp::polygon_with_holes_traits<BoostPolygon90>::hole_type BoostHole90;
 typedef bp::polygon_with_holes_traits<BoostPolygon45>::hole_type BoostHole45;
 typedef bp::polygon_with_holes_traits<BoostPolygonAny>::hole_type BoostHoleAny;
@@ -491,25 +493,11 @@ static Point fromBoostPoint(const bp::point_data<Coord>& point)
         bp::get(point, bp::VERTICAL));
 }
 
-static Ring ringFromBoostPolygon(const BoostPolygonAny& polygon)
+static Ring ringFromBoostPolygon(const BoostNoHolePolygon& polygon)
 {
     Ring out;
 
-    for (bp::polygon_traits<BoostPolygonAny>::iterator_type it =
-             bp::begin_points(polygon);
-         it != bp::end_points(polygon);
-         ++it) {
-        out.push_back(fromBoostPoint(*it));
-    }
-
-    return out;
-}
-
-static Ring ringFromBoostPolygon(const BoostHoleAny& polygon)
-{
-    Ring out;
-
-    for (bp::polygon_traits<BoostHoleAny>::iterator_type it =
+    for (bp::polygon_traits<BoostNoHolePolygon>::iterator_type it =
              bp::begin_points(polygon);
          it != bp::end_points(polygon);
          ++it) {
@@ -521,7 +509,9 @@ static Ring ringFromBoostPolygon(const BoostHoleAny& polygon)
 
 static PolygonList toCustomPolygons(const BoostSetAny& polygons)
 {
-    std::vector<BoostPolygonAny> boostPolygons;
+    // Asking Boost.Polygon for polygon_data, not polygon_with_holes_data,
+    // makes polygon_set_data::get() fracture holes into no-hole polygons.
+    std::vector<BoostNoHolePolygon> boostPolygons;
     polygons.get(boostPolygons);
 
     PolygonList out;
@@ -530,14 +520,6 @@ static PolygonList toCustomPolygons(const BoostSetAny& polygons)
     for (std::size_t i = 0; i < boostPolygons.size(); ++i) {
         Polygon polygon;
         polygon.outer = ringFromBoostPolygon(boostPolygons[i]);
-
-        for (bp::polygon_with_holes_traits<BoostPolygonAny>::iterator_holes_type it =
-                 bp::begin_holes(boostPolygons[i]);
-             it != bp::end_holes(boostPolygons[i]);
-             ++it) {
-            polygon.holes.push_back(ringFromBoostPolygon(*it));
-        }
-
         out.push_back(polygon);
     }
 
