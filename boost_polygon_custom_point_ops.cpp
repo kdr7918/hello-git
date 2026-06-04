@@ -116,6 +116,9 @@ namespace bp = boost::polygon;
 typedef bp::polygon_90_with_holes_data<Coord> BoostPolygon90;
 typedef bp::polygon_45_with_holes_data<Coord> BoostPolygon45;
 typedef bp::polygon_with_holes_data<Coord> BoostPolygonAny;
+typedef bp::polygon_with_holes_traits<BoostPolygon90>::hole_type BoostHole90;
+typedef bp::polygon_with_holes_traits<BoostPolygon45>::hole_type BoostHole45;
+typedef bp::polygon_with_holes_traits<BoostPolygonAny>::hole_type BoostHoleAny;
 
 typedef bp::polygon_90_set_data<Coord> BoostSet90;
 typedef bp::polygon_45_set_data<Coord> BoostSet45;
@@ -249,22 +252,19 @@ static const char* toString(PolygonKind kind)
     return "Unknown";
 }
 
-template <typename BoostPolygon>
-static BoostPolygon toBoostPolygon(const Polygon& polygon)
+static BoostPolygon90 toBoostPolygon90(const Polygon& polygon)
 {
-    typedef typename bp::polygon_with_holes_traits<BoostPolygon>::hole_type BoostHole;
-
-    BoostPolygon out;
+    BoostPolygon90 out;
 
     const Ring outer = makeOpenCleanRing(polygon.outer);
     bp::set_points(out, outer.begin(), outer.end());
 
-    std::vector<BoostHole> holes;
+    std::vector<BoostHole90> holes;
     holes.reserve(polygon.holes.size());
 
     for (std::size_t i = 0; i < polygon.holes.size(); ++i) {
         const Ring holeRing = makeOpenCleanRing(polygon.holes[i]);
-        BoostHole hole;
+        BoostHole90 hole;
         bp::set_points(hole, holeRing.begin(), holeRing.end());
         holes.push_back(hole);
     }
@@ -276,27 +276,149 @@ static BoostPolygon toBoostPolygon(const Polygon& polygon)
     return out;
 }
 
-template <typename BoostSet, typename BoostPolygon>
-static BoostSet makeBoostSet(const PolygonList& polygons)
+static BoostPolygon45 toBoostPolygon45(const Polygon& polygon)
 {
-    BoostSet out;
+    BoostPolygon45 out;
 
-    for (std::size_t i = 0; i < polygons.size(); ++i) {
-        out.insert(toBoostPolygon<BoostPolygon>(polygons[i]));
+    const Ring outer = makeOpenCleanRing(polygon.outer);
+    bp::set_points(out, outer.begin(), outer.end());
+
+    std::vector<BoostHole45> holes;
+    holes.reserve(polygon.holes.size());
+
+    for (std::size_t i = 0; i < polygon.holes.size(); ++i) {
+        const Ring holeRing = makeOpenCleanRing(polygon.holes[i]);
+        BoostHole45 hole;
+        bp::set_points(hole, holeRing.begin(), holeRing.end());
+        holes.push_back(hole);
+    }
+
+    if (!holes.empty()) {
+        bp::set_holes(out, holes.begin(), holes.end());
     }
 
     return out;
 }
 
-template <typename BoostSet>
-static BoostSet applyBooleanTyped(
-    const BoostSet& lhs,
-    const BoostSet& rhs,
+static BoostPolygonAny toBoostPolygonAny(const Polygon& polygon)
+{
+    BoostPolygonAny out;
+
+    const Ring outer = makeOpenCleanRing(polygon.outer);
+    bp::set_points(out, outer.begin(), outer.end());
+
+    std::vector<BoostHoleAny> holes;
+    holes.reserve(polygon.holes.size());
+
+    for (std::size_t i = 0; i < polygon.holes.size(); ++i) {
+        const Ring holeRing = makeOpenCleanRing(polygon.holes[i]);
+        BoostHoleAny hole;
+        bp::set_points(hole, holeRing.begin(), holeRing.end());
+        holes.push_back(hole);
+    }
+
+    if (!holes.empty()) {
+        bp::set_holes(out, holes.begin(), holes.end());
+    }
+
+    return out;
+}
+
+static BoostSet90 makeBoostSet90(const PolygonList& polygons)
+{
+    BoostSet90 out;
+
+    for (std::size_t i = 0; i < polygons.size(); ++i) {
+        out.insert(toBoostPolygon90(polygons[i]));
+    }
+
+    return out;
+}
+
+static BoostSet45 makeBoostSet45(const PolygonList& polygons)
+{
+    BoostSet45 out;
+
+    for (std::size_t i = 0; i < polygons.size(); ++i) {
+        out.insert(toBoostPolygon45(polygons[i]));
+    }
+
+    return out;
+}
+
+static BoostSetAny makeBoostSetAny(const PolygonList& polygons)
+{
+    BoostSetAny out;
+
+    for (std::size_t i = 0; i < polygons.size(); ++i) {
+        out.insert(toBoostPolygonAny(polygons[i]));
+    }
+
+    return out;
+}
+
+static BoostSet90 applyBoolean90(
+    const BoostSet90& lhs,
+    const BoostSet90& rhs,
     BooleanOp op)
 {
     using namespace boost::polygon::operators;
 
-    BoostSet out;
+    BoostSet90 out;
+
+    switch (op) {
+    case BooleanOp::Or:
+        bp::assign(out, lhs | rhs);
+        break;
+    case BooleanOp::And:
+        bp::assign(out, lhs & rhs);
+        break;
+    case BooleanOp::Sub:
+        bp::assign(out, lhs - rhs);
+        break;
+    case BooleanOp::Xor:
+        bp::assign(out, lhs ^ rhs);
+        break;
+    }
+
+    return out;
+}
+
+static BoostSet45 applyBoolean45(
+    const BoostSet45& lhs,
+    const BoostSet45& rhs,
+    BooleanOp op)
+{
+    using namespace boost::polygon::operators;
+
+    BoostSet45 out;
+
+    switch (op) {
+    case BooleanOp::Or:
+        bp::assign(out, lhs | rhs);
+        break;
+    case BooleanOp::And:
+        bp::assign(out, lhs & rhs);
+        break;
+    case BooleanOp::Sub:
+        bp::assign(out, lhs - rhs);
+        break;
+    case BooleanOp::Xor:
+        bp::assign(out, lhs ^ rhs);
+        break;
+    }
+
+    return out;
+}
+
+static BoostSetAny applyBooleanAny(
+    const BoostSetAny& lhs,
+    const BoostSetAny& rhs,
+    BooleanOp op)
+{
+    using namespace boost::polygon::operators;
+
+    BoostSetAny out;
 
     switch (op) {
     case BooleanOp::Or:
@@ -343,12 +465,23 @@ static void resizeInPlace(
     bp::resize(polygons, delta, cornerFillArc, circleSegments);
 }
 
-template <typename BoostSet>
-static BoostSetAny toGenericSet(const BoostSet& polygons)
+static BoostSetAny toGenericSet(const BoostSet90& polygons)
 {
     BoostSetAny out;
     bp::assign(out, polygons);
     return out;
+}
+
+static BoostSetAny toGenericSet(const BoostSet45& polygons)
+{
+    BoostSetAny out;
+    bp::assign(out, polygons);
+    return out;
+}
+
+static BoostSetAny toGenericSet(const BoostSetAny& polygons)
+{
+    return polygons;
 }
 
 static Point fromBoostPoint(const bp::point_data<Coord>& point)
@@ -358,12 +491,25 @@ static Point fromBoostPoint(const bp::point_data<Coord>& point)
         bp::get(point, bp::VERTICAL));
 }
 
-template <typename BoostPolygon>
-static Ring ringFromBoostPolygon(const BoostPolygon& polygon)
+static Ring ringFromBoostPolygon(const BoostPolygonAny& polygon)
 {
     Ring out;
 
-    for (typename bp::polygon_traits<BoostPolygon>::iterator_type it =
+    for (bp::polygon_traits<BoostPolygonAny>::iterator_type it =
+             bp::begin_points(polygon);
+         it != bp::end_points(polygon);
+         ++it) {
+        out.push_back(fromBoostPoint(*it));
+    }
+
+    return out;
+}
+
+static Ring ringFromBoostPolygon(const BoostHoleAny& polygon)
+{
+    Ring out;
+
+    for (bp::polygon_traits<BoostHoleAny>::iterator_type it =
              bp::begin_points(polygon);
          it != bp::end_points(polygon);
          ++it) {
@@ -398,8 +544,23 @@ static PolygonList toCustomPolygons(const BoostSetAny& polygons)
     return out;
 }
 
-template <typename BoostSet>
-static OperationResult makeResult(PolygonKind kind, const BoostSet& polygons)
+static OperationResult makeResult(PolygonKind kind, const BoostSet90& polygons)
+{
+    OperationResult result;
+    result.engineKind = kind;
+    result.polygons = toCustomPolygons(toGenericSet(polygons));
+    return result;
+}
+
+static OperationResult makeResult(PolygonKind kind, const BoostSet45& polygons)
+{
+    OperationResult result;
+    result.engineKind = kind;
+    result.polygons = toCustomPolygons(toGenericSet(polygons));
+    return result;
+}
+
+static OperationResult makeResult(PolygonKind kind, const BoostSetAny& polygons)
 {
     OperationResult result;
     result.engineKind = kind;
@@ -417,20 +578,20 @@ OperationResult booleanPolygons(
         classifyPolygonList(rhs));
 
     if (kind == PolygonKind::Polygon90) {
-        const BoostSet90 lhsSet = makeBoostSet<BoostSet90, BoostPolygon90>(lhs);
-        const BoostSet90 rhsSet = makeBoostSet<BoostSet90, BoostPolygon90>(rhs);
-        return makeResult(kind, applyBooleanTyped(lhsSet, rhsSet, op));
+        const BoostSet90 lhsSet = makeBoostSet90(lhs);
+        const BoostSet90 rhsSet = makeBoostSet90(rhs);
+        return makeResult(kind, applyBoolean90(lhsSet, rhsSet, op));
     }
 
     if (kind == PolygonKind::Polygon45) {
-        const BoostSet45 lhsSet = makeBoostSet<BoostSet45, BoostPolygon45>(lhs);
-        const BoostSet45 rhsSet = makeBoostSet<BoostSet45, BoostPolygon45>(rhs);
-        return makeResult(kind, applyBooleanTyped(lhsSet, rhsSet, op));
+        const BoostSet45 lhsSet = makeBoostSet45(lhs);
+        const BoostSet45 rhsSet = makeBoostSet45(rhs);
+        return makeResult(kind, applyBoolean45(lhsSet, rhsSet, op));
     }
 
-    const BoostSetAny lhsSet = makeBoostSet<BoostSetAny, BoostPolygonAny>(lhs);
-    const BoostSetAny rhsSet = makeBoostSet<BoostSetAny, BoostPolygonAny>(rhs);
-    return makeResult(kind, applyBooleanTyped(lhsSet, rhsSet, op));
+    const BoostSetAny lhsSet = makeBoostSetAny(lhs);
+    const BoostSetAny rhsSet = makeBoostSetAny(rhs);
+    return makeResult(kind, applyBooleanAny(lhsSet, rhsSet, op));
 }
 
 OperationResult resizePolygons(
@@ -442,18 +603,18 @@ OperationResult resizePolygons(
     const PolygonKind kind = classifyPolygonList(input);
 
     if (kind == PolygonKind::Polygon90) {
-        BoostSet90 set = makeBoostSet<BoostSet90, BoostPolygon90>(input);
+        BoostSet90 set = makeBoostSet90(input);
         resizeInPlace(set, delta, cornerFillArc, circleSegments);
         return makeResult(kind, set);
     }
 
     if (kind == PolygonKind::Polygon45) {
-        BoostSet45 set = makeBoostSet<BoostSet45, BoostPolygon45>(input);
+        BoostSet45 set = makeBoostSet45(input);
         resizeInPlace(set, delta, cornerFillArc, circleSegments);
         return makeResult(kind, set);
     }
 
-    BoostSetAny set = makeBoostSet<BoostSetAny, BoostPolygonAny>(input);
+    BoostSetAny set = makeBoostSetAny(input);
     resizeInPlace(set, delta, cornerFillArc, circleSegments);
     return makeResult(kind, set);
 }
