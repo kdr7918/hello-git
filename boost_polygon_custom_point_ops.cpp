@@ -1,12 +1,12 @@
 // boost_polygon_custom_point_ops.cpp
-// C++11 + Boost.Polygon
+// C++11 + Boost.Polygon 1.63
 //
 // Features:
 // - Uses a user-defined Point object as input/output.
 // - Classifies polygon edges as 90-degree, 45-degree, or any-angle.
 // - Chooses Boost.Polygon's polygon_90_set_data, polygon_45_set_data, or
 //   polygon_set_data based on that classification.
-// - Supports Boolean OR, AND, SUB, XOR and size up/down via resize().
+// - Supports Boolean OR, AND, SUB, XOR and size up/down via Boost 1.63 resize APIs.
 // - Returns fractured no-hole polygons only.
 //
 // Build:
@@ -446,7 +446,7 @@ static void resizeInPlace(
     bool,
     unsigned int)
 {
-    bp::resize(polygons, delta);
+    polygons.resize(delta, delta, delta, delta);
 }
 
 static void resizeInPlace(
@@ -455,7 +455,13 @@ static void resizeInPlace(
     bool cornerFillArc,
     unsigned int circleSegments)
 {
-    bp::resize(polygons, delta, cornerFillArc, circleSegments);
+    (void)cornerFillArc;
+    (void)circleSegments;
+
+    // Boost.Polygon 1.63 polygon_45_set_data::resize takes
+    // (delta, RoundingOption, CornerOption), not the arbitrary-set
+    // (delta, corner_fill_arc, circle_segments) arguments.
+    polygons.resize(delta, bp::CLOSEST, bp::INTERSECTION);
 }
 
 static void resizeInPlace(
@@ -464,7 +470,7 @@ static void resizeInPlace(
     bool cornerFillArc,
     unsigned int circleSegments)
 {
-    bp::resize(polygons, delta, cornerFillArc, circleSegments);
+    polygons.resize(delta, cornerFillArc, circleSegments);
 }
 
 static BoostSetAny toGenericSet(const BoostSet90& polygons)
