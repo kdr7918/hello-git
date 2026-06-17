@@ -22,6 +22,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace pointarray_boolean {
@@ -112,8 +113,23 @@ public:
 enum class BooleanOp { Or, And, Sub, Xor };
 enum class GeometryKind { Polygon90, Polygon45, AnyAngle };
 
+struct BooleanTiming {
+    double inputConversionMs;
+    double booleanMs;
+    double getMs;
+    double outputConversionMs;
+
+    BooleanTiming()
+        : inputConversionMs(0.0), booleanMs(0.0), getMs(0.0), outputConversionMs(0.0) {}
+
+    double totalMs() const {
+        return inputConversionMs + booleanMs + getMs + outputConversionMs;
+    }
+};
+
 struct BooleanResult {
     GeometryKind engine;
+    BooleanTiming timing;
     std::vector<PointArray> polygons;
 };
 
@@ -122,6 +138,8 @@ static const char* kindName(GeometryKind k) {
     if (k == GeometryKind::Polygon45) return "polygon_45_set_data";
     return "polygon_set_data";
 }
+
+static double nowMs();
 
 static PointArray makePointArray(const std::vector<Point>& pts) {
     if (pts.size() > static_cast<std::size_t>(std::numeric_limits<std::uint32_t>::max())) {
@@ -293,9 +311,13 @@ static Set applyBoolean(const Set& lhs, const Set& rhs, BooleanOp op) {
 }
 
 template <typename Set>
-static std::vector<PointArray> extractPointArrays(const Set& set) {
+static std::vector<BOutPoly> getBoostPolygons(const Set& set) {
     std::vector<BOutPoly> polys;
     set.get(polys);
+    return polys;
+}
+
+static std::vector<PointArray> convertBoostPolygonsToPointArrays(const std::vector<BOutPoly>& polys) {
     std::vector<PointArray> out;
     out.reserve(polys.size());
     for (std::size_t i = 0; i < polys.size(); ++i) {
@@ -313,26 +335,67 @@ static BooleanResult booleanAuto(const std::vector<PointArray>& lhs,
                                 const std::vector<PointArray>& rhs,
                                 BooleanOp op) {
     BooleanResult result;
+
+    double t0 = nowMs();
     result.engine = classifyAll(lhs, rhs);
 
     if (result.engine == GeometryKind::Polygon90) {
         BSet90 a, b;
         insert90(a, lhs);
         insert90(b, rhs);
+        double t1 = nowMs();
+
         BSet90 out = applyBoolean(a, b, op);
-        result.polygons = extractPointArrays(out);
+        double t2 = nowMs();
+
+        std::vector<BOutPoly> boostPolys = getBoostPolygons(out);
+        double t3 = nowMs();
+
+        result.polygons = convertBoostPolygonsToPointArrays(boostPolys);
+        double t4 = nowMs();
+
+        result.timing.inputConversionMs = t1 - t0;
+        result.timing.booleanMs = t2 - t1;
+        result.timing.getMs = t3 - t2;
+        result.timing.outputConversionMs = t4 - t3;
     } else if (result.engine == GeometryKind::Polygon45) {
         BSet45 a, b;
         insert45(a, lhs);
         insert45(b, rhs);
+        double t1 = nowMs();
+
         BSet45 out = applyBoolean(a, b, op);
-        result.polygons = extractPointArrays(out);
+        double t2 = nowMs();
+
+        std::vector<BOutPoly> boostPolys = getBoostPolygons(out);
+        double t3 = nowMs();
+
+        result.polygons = convertBoostPolygonsToPointArrays(boostPolys);
+        double t4 = nowMs();
+
+        result.timing.inputConversionMs = t1 - t0;
+        result.timing.booleanMs = t2 - t1;
+        result.timing.getMs = t3 - t2;
+        result.timing.outputConversionMs = t4 - t3;
     } else {
         BSetAny a, b;
         insertAny(a, lhs);
         insertAny(b, rhs);
+        double t1 = nowMs();
+
         BSetAny out = applyBoolean(a, b, op);
-        result.polygons = extractPointArrays(out);
+        double t2 = nowMs();
+
+        std::vector<BOutPoly> boostPolys = getBoostPolygons(out);
+        double t3 = nowMs();
+
+        result.polygons = convertBoostPolygonsToPointArrays(boostPolys);
+        double t4 = nowMs();
+
+        result.timing.inputConversionMs = t1 - t0;
+        result.timing.booleanMs = t2 - t1;
+        result.timing.getMs = t3 - t2;
+        result.timing.outputConversionMs = t4 - t3;
     }
     return result;
 }
@@ -391,18 +454,25 @@ static std::size_t countPoints(const std::vector<PointArray>& polys) {
 
 static void bench(const std::string& label, const Dataset& d, int rounds) {
     double best = std::numeric_limits<double>::max();
-    BooleanResult last;
+    BooleanResult bestResult;
     for (int r = 0; r < rounds; ++r) {
-        const double t0 = nowMs();
-        last = booleanAuto(d.lhs, d.rhs, BooleanOp::Or);
-        const double t1 = nowMs();
-        best = std::min(best, t1 - t0);
+        BooleanResult current = booleanAuto(d.lhs, d.rhs, BooleanOp::Or);
+        const double total = current.timing.totalMs();
+        if (total < best) {
+            best = total;
+            bestResult = std::move(current);
+        }
     }
-    std::cout << std::left << std::setw(24) << label
-              << std::setw(24) << kindName(last.engine)
-              << std::right << std::setw(12) << std::fixed << std::setprecision(3) << best
-              << std::setw(14) << last.polygons.size()
-              << std::setw(14) << countPoints(last.polygons) << '\n';
+    std::cout << std::left << std::setw(20) << label
+              << std::setw(24) << kindName(bestResult.engine)
+              << std::right << std::fixed << std::setprecision(3)
+              << std::setw(11) << bestResult.timing.totalMs()
+              << std::setw(11) << bestResult.timing.inputConversionMs
+              << std::setw(11) << bestResult.timing.booleanMs
+              << std::setw(11) << bestResult.timing.getMs
+              << std::setw(11) << bestResult.timing.outputConversionMs
+              << std::setw(12) << bestResult.polygons.size()
+              << std::setw(12) << countPoints(bestResult.polygons) << '\n';
 }
 
 static void sanityCheck() {
@@ -432,12 +502,17 @@ int main(int argc, char** argv) {
         pointarray_boolean::Dataset any = pointarray_boolean::makeDataset(count, pointarray_boolean::GeometryKind::AnyAngle);
 
         std::cout << "PointArray Boost.Polygon auto-dispatch benchmark, op=OR, best-of=" << rounds << "\n";
-        std::cout << "Times include classify + PointArray->Boost conversion + boolean + Boost->PointArray extraction.\n";
-        std::cout << std::left << std::setw(24) << "dataset"
+        std::cout << "Timing columns are milliseconds: total = input conversion + boolean + get + output conversion.\n";
+        std::cout << "input conversion includes geometry classification and PointArray->Boost insertion.\n";
+        std::cout << std::left << std::setw(20) << "dataset"
                   << std::setw(24) << "selected engine"
-                  << std::right << std::setw(12) << "ms"
-                  << std::setw(14) << "out polys"
-                  << std::setw(14) << "out points" << '\n';
+                  << std::right << std::setw(11) << "total"
+                  << std::setw(11) << "in_conv"
+                  << std::setw(11) << "boolean"
+                  << std::setw(11) << "get"
+                  << std::setw(11) << "out_conv"
+                  << std::setw(12) << "out polys"
+                  << std::setw(12) << "out points" << '\n';
         pointarray_boolean::bench("90 rectilinear", d90, rounds);
         pointarray_boolean::bench("45 mixed", d45, rounds);
         pointarray_boolean::bench("any angle mixed", any, rounds);
