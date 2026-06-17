@@ -46,12 +46,12 @@ is selected:
    - Use `boost::polygon::polygon_set_data<int64_t>`.
    - This is the safe fallback for arbitrary-angle polygons.
 
-The benchmark includes:
+The benchmark reports separate timing columns for:
 
-- geometry classification time
-- `PointArray -> Boost.Polygon` conversion time
-- boolean operation time
-- `Boost.Polygon -> PointArray` extraction time
+- `in_conv`: geometry classification + `PointArray -> Boost.Polygon` insertion
+- `boolean`: Boost.Polygon boolean operation
+- `get`: `Boost.Polygon set.get(...)` extraction into Boost polygon objects
+- `out_conv`: Boost polygon object -> `PointArray` conversion
 
 ## Copy-friendly engine dispatch snippet
 
@@ -136,18 +136,20 @@ Command:
 
 Result on this machine, OR operation, best-of-1:
 
-- `90 rectilinear`
-  - selected engine: `polygon_90_set_data`
-  - time: `2787.612 ms`
-  - output: `1,000,000 polygons / 10,800,000 points`
-- `45 mixed`
-  - selected engine: `polygon_45_set_data`
-  - time: `3583.501 ms`
-  - output: `1,000,000 polygons / 7,000,000 points`
-- `any angle mixed`
-  - selected engine: `polygon_set_data`
-  - time: `21182.907 ms`
-  - output: `1,000,000 polygons / 8,500,000 points`
+```text
+dataset             selected engine               total    in_conv    boolean        get   out_conv   out polys  out points
+90 rectilinear      polygon_90_set_data        2562.114    294.938    988.739   1172.494    105.944     1000000    10800000
+45 mixed            polygon_45_set_data        3468.651    507.334    231.696   2641.705     87.916     1000000     7000000
+any angle mixed     polygon_set_data          20719.792    548.009   9859.926  10215.691     96.166     1000000     8500000
+```
+
+Timing columns are milliseconds:
+
+- `total`: `in_conv + boolean + get + out_conv`
+- `in_conv`: geometry classification + input `PointArray` insertion into Boost.Polygon set
+- `boolean`: Boost.Polygon boolean operation only
+- `get`: `set.get(...)` into Boost polygon objects
+- `out_conv`: Boost polygon objects converted back to `PointArray`
 
 Conclusion: keep the dispatch order as `90 -> 45 -> any-angle`.  The 90-degree
 engine is fastest when legal, the 45-degree engine is the right middle path for
