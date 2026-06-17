@@ -1,36 +1,6 @@
-# hello-git
-깃허브 테스트
+# PointArray Boost.Polygon Boolean Dispatcher
 
-github test 
-branch is good
-HAHAHA
-
-## Boost.Polygon 1.63 custom point ops
-
-`boost_polygon_custom_point_ops.cpp` contains a C++11 / Boost.Polygon 1.63 example that:
-
-- uses a custom `Point` object through Boost.Polygon point traits
-- classifies polygons as `Polygon90`, `Polygon45`, or `AnyAngle`
-- runs Boolean `OR`, `AND`, `SUB`, `XOR`
-- runs size up/down through Boost.Polygon 1.63 `resize()` APIs
-- returns fractured no-hole polygons only
-
-Build:
-
-```sh
-c++ -std=c++11 boost_polygon_custom_point_ops.cpp -o boost_polygon_custom_point_ops
-```
-
-If Boost 1.63 is not in the compiler default include path:
-
-```sh
-c++ -std=c++11 -I/path/to/boost_1_63_0 boost_polygon_custom_point_ops.cpp -o boost_polygon_custom_point_ops
-```
-
-## PointArray -> Boost.Polygon polygon_90_set benchmark
-
-`boost_polygon90_pointarray_benchmark.cpp` is a self-contained C++11 example for
-legacy-style geometry containers:
+C++11 example for boolean operations on legacy-style geometry containers:
 
 ```cpp
 struct Point {
@@ -43,185 +13,143 @@ public:
     uint32_t size;
     uint32_t numPoints;
     Point* points;
-    // copy/move/ownership helpers included in the example
 };
 ```
 
-The public boolean shape is:
+Input/output shape:
 
 ```cpp
-std::vector<PointArray> output = booleanRectFastPath(lhs, rhs, BooleanOp::Or);
+std::vector<PointArray> lhs;
+std::vector<PointArray> rhs;
+BooleanResult result = booleanAuto(lhs, rhs, BooleanOp::Or);
+std::vector<PointArray> output = result.polygons;
 ```
 
-The implementation targets rectilinear rectangle/polygon data and uses
-`boost::polygon::polygon_90_set_data<int64_t>`.  The benchmark intentionally
-measures **PointArray -> Boost conversion + boolean + Boost -> PointArray
-extraction**, because conversion cost is material for this API shape.
+## Core idea
 
-Variants included:
+Geometry is classified before conversion so the fastest safe Boost.Polygon engine
+is selected:
 
-- `generic tmp vector each polygon`: converts every `PointArray` through a fresh
-  temporary point vector.
-- `generic reusable scratch`: reuses a scratch point vector while converting
-  polygons.
-- `rect fast path + scratch`: detects 4-point rectangles and inserts
-  `rectangle_data` directly; falls back to polygon conversion for non-rectangles.
-- `prebuilt sets boolean+extract`: measures boolean + extraction after both
-  Boost sets are already built. This is useful for separating pure boolean time,
-  but it does **not** include input conversion.
+1. **All 90-degree rectilinear edges**
+   - Use `boost::polygon::polygon_90_set_data<int64_t>`.
+   - 4-point rectangles use a fast path through
+     `boost::polygon::rectangle_data<int64_t>`.
+   - Non-rectangle rectilinear polygons reuse one scratch vector and convert to
+     `polygon_90_data<int64_t>`.
 
-Build:
+2. **Only 0/45/90-degree edges**
+   - Use `boost::polygon::polygon_45_set_data<int64_t>`.
+   - This avoids falling all the way back to the generic arbitrary-angle engine
+     when 45-degree geometry is present.
 
-```sh
-c++ -O3 -DNDEBUG -std=c++11 boost_polygon90_pointarray_benchmark.cpp -o boost_polygon90_pointarray_benchmark
-```
+3. **Any other edge angle**
+   - Use `boost::polygon::polygon_set_data<int64_t>`.
+   - This is the safe fallback for arbitrary-angle polygons.
 
-Run:
+The benchmark includes:
 
-```sh
-# Default is 1,000,000 LHS + 1,000,000 RHS polygons, one round.
-./boost_polygon90_pointarray_benchmark
+- geometry classification time
+- `PointArray -> Boost.Polygon` conversion time
+- boolean operation time
+- `Boost.Polygon -> PointArray` extraction time
 
-# Or override polygon count and rounds.
-./boost_polygon90_pointarray_benchmark 1000000 1
-```
-
-Latest local benchmark on this machine, generated rectilinear data, 1,000,000
-LHS + 1,000,000 RHS polygons, best-of-1.  The mixed dataset is 70% rectangles,
-20% stair polygons, and 10% more complex comb polygons (~20 vertices each):
-
-- All rectangles, OR:
-  - generic tmp vector each polygon: 1839.857 ms
-  - generic reusable scratch: 1733.341 ms
-  - **rect fast path + scratch: 1645.477 ms** ← fastest full PointArray pipeline
-  - prebuilt sets boolean+extract: 1532.403 ms, excludes input conversion
-- 70% rectangles + 20% stair + 10% complex comb polygons, OR:
-  - generic tmp vector each polygon: 2646.680 ms
-  - generic reusable scratch: 2531.862 ms
-  - **rect fast path + scratch: 2510.013 ms** ← fastest full PointArray pipeline
-  - prebuilt sets boolean+extract: 2195.477 ms, excludes input conversion
-- All rectangles, AND:
-  - generic tmp vector each polygon: 1273.873 ms
-  - generic reusable scratch: 1201.126 ms
-  - **rect fast path + scratch: 1135.808 ms** ← fastest full PointArray pipeline
-  - prebuilt sets boolean+extract: 985.573 ms, excludes input conversion
-
-Conclusion: for `std::vector<PointArray>` input/output, the fastest measured
-full-pipeline implementation is `booleanRectFastPath`: rectangle detection +
-`rectangle_data` insertion + reusable scratch conversion for non-rectilinear
-polygons.  If data is already cached as `polygon_90_set_data`, pure
-boolean+extract is faster, but that excludes the required conversion cost.
-
-
-## Fastest full-pipeline core concept
-
-![PointArray polygon_90 fast path flow](docs/pointarray_polygon90_fast_path_flow.svg)
-
-The fastest measured full `std::vector<PointArray>` input/output path is not a
-new Boolean algorithm; it is a conversion strategy around
-`boost::polygon::polygon_90_set_data<int64_t>`:
-
-1. **Detect rectangles first.** If a `PointArray` has exactly four bbox corners,
-   insert `boost::polygon::rectangle_data<int64_t>` directly.
-2. **Reuse one scratch vector for non-rectangles.** For real rectilinear polygons,
-   clear/reserve a reusable `std::vector<point_data<int64_t>>`, then build
-   `polygon_90_data<int64_t>`.
-3. **Run Boolean on `polygon_90_set_data`.** Use `assign(out, lhs | rhs)` style
-   Boost.Polygon operators.
-4. **Extract fractured no-hole polygons.** `set.get(std::vector<polygon_data>)`
-   maps cleanly back to `std::vector<PointArray>`.
-
-Copy-friendly minimal version of the fast path:
+## Copy-friendly engine dispatch snippet
 
 ```cpp
-#include <boost/polygon/polygon.hpp>
-#include <algorithm>
-#include <cstdint>
-#include <vector>
+enum class GeometryKind { Polygon90, Polygon45, AnyAngle };
 
-namespace bp = boost::polygon;
+static GeometryKind edgeKind(const Point& a, const Point& b) {
+    const int64_t dx = b.x - a.x;
+    const int64_t dy = b.y - a.y;
+    if (dx == 0 || dy == 0) return GeometryKind::Polygon90;
 
-struct Point {
-    int64_t x;
-    int64_t y;
-};
+    const int64_t adx = dx < 0 ? -dx : dx;
+    const int64_t ady = dy < 0 ? -dy : dy;
+    if (adx == ady) return GeometryKind::Polygon45;
 
-struct PointArray {
-    uint32_t size;
-    uint32_t numPoints;
-    Point* points;
-};
-
-typedef int64_t Coord;
-typedef bp::point_data<Coord> BPoint;
-typedef bp::rectangle_data<Coord> BRect;
-typedef bp::polygon_90_data<Coord> BPoly90;
-typedef bp::polygon_data<Coord> BOutPoly;
-typedef bp::polygon_90_set_data<Coord> BSet90;
-
-static bool tryGetRect(const PointArray& pa, BRect& rect) {
-    if (pa.numPoints != 4) return false;
-
-    Coord xl = pa.points[0].x, xh = pa.points[0].x;
-    Coord yl = pa.points[0].y, yh = pa.points[0].y;
-    for (uint32_t i = 1; i < 4; ++i) {
-        xl = std::min(xl, pa.points[i].x);
-        xh = std::max(xh, pa.points[i].x);
-        yl = std::min(yl, pa.points[i].y);
-        yh = std::max(yh, pa.points[i].y);
-    }
-    if (xl == xh || yl == yh) return false;
-
-    bool ll = false, lr = false, ur = false, ul = false;
-    for (uint32_t i = 0; i < 4; ++i) {
-        const Point& p = pa.points[i];
-        ll = ll || (p.x == xl && p.y == yl);
-        lr = lr || (p.x == xh && p.y == yl);
-        ur = ur || (p.x == xh && p.y == yh);
-        ul = ul || (p.x == xl && p.y == yh);
-    }
-    if (!(ll && lr && ur && ul)) return false;
-
-    rect = BRect(xl, yl, xh, yh);
-    return true;
+    return GeometryKind::AnyAngle;
 }
 
-static void insertPointArraysFast(BSet90& set,
-                                  const std::vector<PointArray>& input) {
-    std::vector<BPoint> scratch;
-    BPoly90 poly;
-
-    for (std::size_t i = 0; i < input.size(); ++i) {
-        BRect rect;
-        if (tryGetRect(input[i], rect)) {
-            // Fastest case: no PointArray -> point-vector -> polygon conversion.
-            set.insert(rect);
-            continue;
-        }
-
-        // Fallback for complex rectilinear polygons: reuse allocation.
-        scratch.clear();
-        scratch.reserve(input[i].numPoints);
-        for (uint32_t j = 0; j < input[i].numPoints; ++j) {
-            scratch.push_back(BPoint(input[i].points[j].x,
-                                     input[i].points[j].y));
-        }
-        bp::set_points(poly, scratch.begin(), scratch.end());
-        set.insert(poly);
+static GeometryKind classifyOne(const PointArray& pa) {
+    GeometryKind out = GeometryKind::Polygon90;
+    for (uint32_t i = 0; i < pa.numPoints; ++i) {
+        GeometryKind e = edgeKind(pa.points[i], pa.points[(i + 1) % pa.numPoints]);
+        if (e == GeometryKind::AnyAngle) return GeometryKind::AnyAngle;
+        if (e == GeometryKind::Polygon45) out = GeometryKind::Polygon45;
     }
-}
-
-static BSet90 booleanOrFast(const std::vector<PointArray>& lhs,
-                            const std::vector<PointArray>& rhs) {
-    using namespace boost::polygon::operators;
-
-    BSet90 a;
-    BSet90 b;
-    insertPointArraysFast(a, lhs);
-    insertPointArraysFast(b, rhs);
-
-    BSet90 out;
-    bp::assign(out, a | b);  // Use &, -, ^ for AND, SUB, XOR.
     return out;
 }
 ```
+
+Full buildable code is in:
+
+```text
+pointarray_boost_boolean_benchmark.cpp
+```
+
+## Build
+
+```sh
+c++ -O3 -DNDEBUG -std=c++11 pointarray_boost_boolean_benchmark.cpp -o pointarray_boost_boolean_benchmark
+```
+
+## Run
+
+```sh
+# Default: 1,000,000 LHS + 1,000,000 RHS polygons per dataset, one round.
+./pointarray_boost_boolean_benchmark
+
+# Override count and rounds.
+./pointarray_boost_boolean_benchmark 1000000 1
+```
+
+## Benchmark datasets
+
+The benchmark creates three datasets:
+
+- `90 rectilinear`
+  - rectangles plus complex rectilinear comb polygons
+  - expected engine: `polygon_90_set_data`
+- `45 mixed`
+  - rectangles plus 45-degree diamonds
+  - expected engine: `polygon_45_set_data`
+- `any angle mixed`
+  - 45-degree diamonds plus arbitrary-angle triangles
+  - expected engine: `polygon_set_data`
+
+## Notes
+
+- The 90-degree path is still fastest for purely rectilinear data because it can
+  use both `polygon_90_set_data` and the rectangle fast path.
+- The 45-degree path prevents unnecessary fallback to arbitrary-angle boolean for
+  layouts that contain Manhattan + diagonal-45 edges only.
+- The any-angle path is intentionally the fallback because it is more general and
+  usually slower.
+
+## Latest local 1M benchmark
+
+Command:
+
+```sh
+./pointarray_boost_boolean_benchmark 1000000 1
+```
+
+Result on this machine, OR operation, best-of-1:
+
+- `90 rectilinear`
+  - selected engine: `polygon_90_set_data`
+  - time: `2787.612 ms`
+  - output: `1,000,000 polygons / 10,800,000 points`
+- `45 mixed`
+  - selected engine: `polygon_45_set_data`
+  - time: `3583.501 ms`
+  - output: `1,000,000 polygons / 7,000,000 points`
+- `any angle mixed`
+  - selected engine: `polygon_set_data`
+  - time: `21182.907 ms`
+  - output: `1,000,000 polygons / 8,500,000 points`
+
+Conclusion: keep the dispatch order as `90 -> 45 -> any-angle`.  The 90-degree
+engine is fastest when legal, the 45-degree engine is the right middle path for
+Manhattan + diagonal-45 data, and the generic any-angle engine should be used
+only when at least one arbitrary-angle edge exists.
