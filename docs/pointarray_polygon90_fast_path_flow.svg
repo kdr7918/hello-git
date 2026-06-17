@@ -1,0 +1,113 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720" viewBox="0 0 1280 720" role="img" aria-labelledby="title desc">
+  <title id="title">PointArray to Boost.Polygon polygon_90_set fast path flow</title>
+  <desc id="desc">Flow diagram showing the fastest full pipeline: PointArray input, rectangle fast path or polygon scratch conversion, polygon_90_set boolean, and PointArray output.</desc>
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0" stop-color="#020617"/>
+      <stop offset="1" stop-color="#111827"/>
+    </linearGradient>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#1e293b" stroke-width="0.7" opacity="0.8"/>
+    </pattern>
+    <filter id="shadow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="8" stdDeviation="8" flood-color="#000000" flood-opacity="0.35"/>
+    </filter>
+    <marker id="arrow" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#38bdf8"/>
+    </marker>
+    <marker id="arrowGreen" markerWidth="12" markerHeight="12" refX="10" refY="6" orient="auto" markerUnits="strokeWidth">
+      <path d="M2,2 L10,6 L2,10 Z" fill="#34d399"/>
+    </marker>
+    <style>
+      .title { font: 700 30px 'JetBrains Mono', 'Consolas', monospace; fill: #f8fafc; }
+      .subtitle { font: 14px 'JetBrains Mono', 'Consolas', monospace; fill: #94a3b8; }
+      .box-title { font: 700 17px 'JetBrains Mono', 'Consolas', monospace; fill: #f8fafc; }
+      .box-sub { font: 12px 'JetBrains Mono', 'Consolas', monospace; fill: #cbd5e1; }
+      .tiny { font: 11px 'JetBrains Mono', 'Consolas', monospace; fill: #94a3b8; }
+      .note { font: 12px 'JetBrains Mono', 'Consolas', monospace; fill: #fde68a; }
+      .arrow { fill: none; stroke: #38bdf8; stroke-width: 3; marker-end: url(#arrow); }
+      .arrowG { fill: none; stroke: #34d399; stroke-width: 3; marker-end: url(#arrowGreen); }
+      .dash { stroke-dasharray: 8 6; }
+    </style>
+  </defs>
+  <rect width="1280" height="720" fill="url(#bg)"/>
+  <rect width="1280" height="720" fill="url(#grid)" opacity="0.75"/>
+
+  <text x="52" y="58" class="title">Fastest PointArray → polygon_90_set Pipeline</text>
+  <text x="54" y="86" class="subtitle">Best full-pipeline case: rectangle_data fast path + reusable scratch conversion + polygon_90_set boolean</text>
+
+  <!-- arrows behind boxes -->
+  <path class="arrow" d="M235 212 C270 212 280 212 318 212"/>
+  <path class="arrow" d="M510 180 C575 150 610 130 680 130"/>
+  <path class="arrow" d="M510 245 C575 295 610 336 680 336"/>
+  <path class="arrowG" d="M930 130 C1010 155 1050 205 1050 270"/>
+  <path class="arrowG" d="M930 336 C1010 315 1045 295 1050 270"/>
+  <path class="arrowG" d="M1130 270 C1170 270 1185 270 1210 270"/>
+  <path class="arrow dash" d="M1035 424 C920 475 735 492 600 468 C470 445 360 400 300 352"/>
+
+  <!-- input -->
+  <g filter="url(#shadow)">
+    <rect x="50" y="154" width="185" height="116" rx="12" fill="#0f172a"/>
+    <rect x="50" y="154" width="185" height="116" rx="12" fill="rgba(8,51,68,0.45)" stroke="#22d3ee" stroke-width="2"/>
+    <text x="72" y="190" class="box-title">Input</text>
+    <text x="72" y="217" class="box-sub">std::vector&lt;PointArray&gt;</text>
+    <text x="72" y="240" class="tiny">rectilinear data</text>
+  </g>
+
+  <!-- classifier -->
+  <g filter="url(#shadow)">
+    <rect x="318" y="154" width="192" height="116" rx="12" fill="#0f172a"/>
+    <rect x="318" y="154" width="192" height="116" rx="12" fill="rgba(120,53,15,0.32)" stroke="#fbbf24" stroke-width="2"/>
+    <text x="340" y="188" class="box-title">tryGetRect()</text>
+    <text x="340" y="216" class="box-sub">4 vertices + bbox</text>
+    <text x="340" y="239" class="tiny">cheap rectangle detection</text>
+  </g>
+
+  <!-- rect fast path -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="78" width="250" height="104" rx="12" fill="#0f172a"/>
+    <rect x="680" y="78" width="250" height="104" rx="12" fill="rgba(6,78,59,0.42)" stroke="#34d399" stroke-width="2"/>
+    <text x="704" y="112" class="box-title">Rectangle Fast Path</text>
+    <text x="704" y="140" class="box-sub">set.insert(rectangle_data)</text>
+    <text x="704" y="162" class="tiny">no point-vector conversion</text>
+  </g>
+
+  <!-- polygon fallback -->
+  <g filter="url(#shadow)">
+    <rect x="680" y="284" width="250" height="120" rx="12" fill="#0f172a"/>
+    <rect x="680" y="284" width="250" height="120" rx="12" fill="rgba(76,29,149,0.42)" stroke="#a78bfa" stroke-width="2"/>
+    <text x="704" y="318" class="box-title">Polygon Fallback</text>
+    <text x="704" y="346" class="box-sub">scratch.clear()/reserve()</text>
+    <text x="704" y="368" class="box-sub">set_points(polygon_90_data)</text>
+    <text x="704" y="390" class="tiny">reuses allocation across polygons</text>
+  </g>
+
+  <!-- set boolean -->
+  <g filter="url(#shadow)">
+    <rect x="1035" y="218" width="155" height="104" rx="12" fill="#0f172a"/>
+    <rect x="1035" y="218" width="155" height="104" rx="12" fill="rgba(6,78,59,0.45)" stroke="#34d399" stroke-width="2"/>
+    <text x="1057" y="252" class="box-title">Boolean</text>
+    <text x="1057" y="279" class="box-sub">polygon_90_set</text>
+    <text x="1057" y="301" class="tiny">OR / AND / SUB / XOR</text>
+  </g>
+
+  <!-- output -->
+  <g filter="url(#shadow)">
+    <rect x="1210" y="218" width="52" height="104" rx="12" fill="#0f172a"/>
+    <rect x="1210" y="218" width="52" height="104" rx="12" fill="rgba(8,51,68,0.45)" stroke="#22d3ee" stroke-width="2"/>
+    <text x="1225" y="258" class="box-title" transform="rotate(90 1225,258)">Output</text>
+  </g>
+
+  <!-- extraction -->
+  <g filter="url(#shadow)">
+    <rect x="434" y="438" width="380" height="118" rx="12" fill="#0f172a"/>
+    <rect x="434" y="438" width="380" height="118" rx="12" fill="rgba(30,41,59,0.66)" stroke="#94a3b8" stroke-width="2"/>
+    <text x="458" y="474" class="box-title">Extraction</text>
+    <text x="458" y="502" class="box-sub">set.get(std::vector&lt;polygon_data&gt;)</text>
+    <text x="458" y="526" class="box-sub">copy vertices back to PointArray</text>
+  </g>
+
+  <rect x="52" y="612" width="1176" height="64" rx="10" fill="rgba(15,23,42,0.92)" stroke="#334155"/>
+  <text x="78" y="640" class="note">Core idea: avoid conversion for rectangles; for real polygons, reuse one scratch vector; only then run Boost.Polygon polygon_90_set.</text>
+  <text x="78" y="662" class="tiny">For 1M mixed polygons on this machine: rect fast path + scratch = 2510.013 ms full pipeline; prebuilt set boolean+extract = 2195.477 ms excluding input conversion.</text>
+</svg>
