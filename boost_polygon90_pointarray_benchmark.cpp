@@ -151,8 +151,38 @@ static PointArray makeStair(Coord x, Coord y, Coord step, int steps, Coord heigh
         p.push_back(Point(x + step * (i + 1), y + step * i));
         p.push_back(Point(x + step * (i + 1), y + step * (i + 1)));
     }
-    p.push_back(Point(x + step * steps, y + height));
+    if (p.back().y != y + height) {
+        p.push_back(Point(x + step * steps, y + height));
+    }
     p.push_back(Point(x, y + height));
+    return makePointArray(p);
+}
+
+static PointArray makeComb(Coord x, Coord y, Coord tooth, int teeth, Coord depth) {
+    // More complex rectilinear simple polygon with alternating notches.
+    // Point count is roughly 2 * teeth + 4; with teeth=8 this is 20 points.
+    std::vector<Point> p;
+    const Coord w = tooth * teeth;
+    const Coord h = depth * 3;
+    p.reserve(static_cast<std::size_t>(2 * teeth + 4));
+    p.push_back(Point(x, y));
+    p.push_back(Point(x + w, y));
+    p.push_back(Point(x + w, y + h));
+    for (int i = teeth - 1; i >= 0; --i) {
+        const Coord right = x + tooth * (i + 1);
+        const Coord left = x + tooth * i;
+        if ((i % 2) == 0) {
+            p.push_back(Point(right, y + h - depth));
+            p.push_back(Point(left, y + h - depth));
+        } else {
+            p.push_back(Point(right, y + h));
+            p.push_back(Point(left, y + h));
+        }
+    }
+    p.push_back(Point(x, y));
+    if (!p.empty() && p.front().x == p.back().x && p.front().y == p.back().y) {
+        p.pop_back();
+    }
     return makePointArray(p);
 }
 
@@ -346,8 +376,8 @@ static Dataset makeRectDataset(int count, Coord pitch, Coord size, Coord rhsShif
     d.lhs.reserve(count);
     d.rhs.reserve(count);
     for (int i = 0; i < count; ++i) {
-        Coord x = static_cast<Coord>(i % 200) * pitch;
-        Coord y = static_cast<Coord>(i / 200) * pitch;
+        Coord x = static_cast<Coord>(i % 1000) * pitch;
+        Coord y = static_cast<Coord>(i / 1000) * pitch;
         d.lhs.push_back(makeRect(x, y, x + size, y + size));
         d.rhs.push_back(makeRect(x + rhsShift, y + rhsShift, x + rhsShift + size, y + rhsShift + size));
     }
@@ -355,13 +385,19 @@ static Dataset makeRectDataset(int count, Coord pitch, Coord size, Coord rhsShif
 }
 
 static Dataset makeMixedDataset(int count, Coord pitch, Coord size, Coord rhsShift) {
+    // 70% rectangles, 20% medium stair polygons, 10% more complex comb polygons.
+    // The comb polygons intentionally add ~20-point rectilinear shapes so the
+    // conversion path is not optimized only for rectangles.
     Dataset d;
     d.lhs.reserve(count);
     d.rhs.reserve(count);
     for (int i = 0; i < count; ++i) {
-        Coord x = static_cast<Coord>(i % 200) * pitch;
-        Coord y = static_cast<Coord>(i / 200) * pitch;
-        if ((i % 5) == 0) {
+        Coord x = static_cast<Coord>(i % 1000) * pitch;
+        Coord y = static_cast<Coord>(i / 1000) * pitch;
+        if ((i % 10) == 0) {
+            d.lhs.push_back(makeComb(x, y, size / 4, 8, size / 4));
+            d.rhs.push_back(makeComb(x + rhsShift, y + rhsShift, size / 4, 8, size / 4));
+        } else if ((i % 5) == 0) {
             d.lhs.push_back(makeStair(x, y, size / 4, 4, size));
             d.rhs.push_back(makeStair(x + rhsShift, y + rhsShift, size / 4, 4, size));
         } else {
@@ -477,8 +513,8 @@ static void sanityCheck() {
 
 int main(int argc, char** argv) {
     try {
-        int count = 5000;
-        int rounds = 5;
+        int count = 1000000;
+        int rounds = 1;
         if (argc > 1) {
             count = std::atoi(argv[1]);
         }
@@ -498,7 +534,7 @@ int main(int argc, char** argv) {
         std::cout << "except 'prebuilt sets boolean+extract', which excludes input conversion.\n";
 
         pa90::benchmarkDataset("all rectangles", rects, pa90::BooleanOp::Or, rounds);
-        pa90::benchmarkDataset("80% rectangles + 20% stair polygons", mixed, pa90::BooleanOp::Or, rounds);
+        pa90::benchmarkDataset("70% rectangles + 20% stair + 10% complex comb polygons", mixed, pa90::BooleanOp::Or, rounds);
         pa90::benchmarkDataset("all rectangles", rects, pa90::BooleanOp::And, rounds);
 
         return 0;
