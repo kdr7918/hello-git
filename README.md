@@ -53,12 +53,6 @@ The benchmark reports separate timing columns for:
 - `get`: `Boost.Polygon set.get(...)` extraction into Boost polygon objects
 - `out_conv`: Boost polygon object -> `PointArray` conversion
 
-For `polygon_90_set_data` only, the benchmark can call Boost's vertex-threshold
-`get(output, vthreshold)` overload.  This fractures 90-degree output polygons so
-large polygons are split around the requested maximum vertex count.  The 45-degree
-and arbitrary-angle set types in Boost.Polygon do not expose the same overload, so
-that argument is ignored for those engines.
-
 ## Copy-friendly engine dispatch snippet
 
 ```cpp
@@ -107,10 +101,6 @@ c++ -O3 -DNDEBUG -std=c++11 pointarray_boost_boolean_benchmark.cpp -o pointarray
 
 # Override count and rounds.
 ./pointarray_boost_boolean_benchmark 1000000 1
-
-# Optional third argument: polygon_90_set_data get vertex threshold.
-# 0 or omitted means unlimited/default get().  Only the 90-degree engine uses it.
-./pointarray_boost_boolean_benchmark 1000000 1 1000
 ```
 
 ## Benchmark datasets
@@ -160,16 +150,6 @@ Timing columns are milliseconds:
 - `boolean`: Boost.Polygon boolean operation only
 - `get`: `set.get(...)` into Boost polygon objects
 - `out_conv`: Boost polygon objects converted back to `PointArray`
-
-Optional 90-degree vertex-threshold example:
-
-```sh
-./pointarray_boost_boolean_benchmark 1000 1 16
-```
-
-This calls `polygon_90_set_data::get(polys, 16)` on the 90-degree result path.
-Because the threshold fractures large polygons, output polygon/point counts can
-change compared with the unlimited/default `get(polys)` path.
 
 Conclusion: keep the dispatch order as `90 -> 45 -> any-angle`.  The 90-degree
 engine is fastest when legal, the 45-degree engine is the right middle path for
