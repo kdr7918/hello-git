@@ -79,27 +79,32 @@ c++ -O3 -DNDEBUG -std=c++11 boost_polygon90_pointarray_benchmark.cpp -o boost_po
 Run:
 
 ```sh
-./boost_polygon90_pointarray_benchmark 20000 3
+# Default is 1,000,000 LHS + 1,000,000 RHS polygons, one round.
+./boost_polygon90_pointarray_benchmark
+
+# Or override polygon count and rounds.
+./boost_polygon90_pointarray_benchmark 1000000 1
 ```
 
-Latest local benchmark on this machine, generated rectilinear data, 20,000 LHS +
-20,000 RHS polygons, best-of-3:
+Latest local benchmark on this machine, generated rectilinear data, 1,000,000
+LHS + 1,000,000 RHS polygons, best-of-1.  The mixed dataset is 70% rectangles,
+20% stair polygons, and 10% more complex comb polygons (~20 vertices each):
 
 - All rectangles, OR:
-  - generic tmp vector each polygon: 27.362 ms
-  - generic reusable scratch: 24.380 ms
-  - **rect fast path + scratch: 22.995 ms** ← fastest full PointArray pipeline
-  - prebuilt sets boolean+extract: 19.011 ms, excludes input conversion
-- 80% rectangles + 20% stair polygons, OR:
-  - generic tmp vector each polygon: 30.050 ms
-  - generic reusable scratch: 28.575 ms
-  - **rect fast path + scratch: 26.909 ms** ← fastest full PointArray pipeline
-  - prebuilt sets boolean+extract: 20.641 ms, excludes input conversion
+  - generic tmp vector each polygon: 1839.857 ms
+  - generic reusable scratch: 1733.341 ms
+  - **rect fast path + scratch: 1645.477 ms** ← fastest full PointArray pipeline
+  - prebuilt sets boolean+extract: 1532.403 ms, excludes input conversion
+- 70% rectangles + 20% stair + 10% complex comb polygons, OR:
+  - generic tmp vector each polygon: 2646.680 ms
+  - generic reusable scratch: 2531.862 ms
+  - **rect fast path + scratch: 2510.013 ms** ← fastest full PointArray pipeline
+  - prebuilt sets boolean+extract: 2195.477 ms, excludes input conversion
 - All rectangles, AND:
-  - generic tmp vector each polygon: 18.115 ms
-  - generic reusable scratch: 16.260 ms
-  - **rect fast path + scratch: 14.993 ms** ← fastest full PointArray pipeline
-  - prebuilt sets boolean+extract: 11.692 ms, excludes input conversion
+  - generic tmp vector each polygon: 1273.873 ms
+  - generic reusable scratch: 1201.126 ms
+  - **rect fast path + scratch: 1135.808 ms** ← fastest full PointArray pipeline
+  - prebuilt sets boolean+extract: 985.573 ms, excludes input conversion
 
 Conclusion: for `std::vector<PointArray>` input/output, the fastest measured
 full-pipeline implementation is `booleanRectFastPath`: rectangle detection +
