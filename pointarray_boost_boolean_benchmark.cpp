@@ -310,19 +310,30 @@ static Set applyBoolean(const Set& lhs, const Set& rhs, BooleanOp op) {
     return out;
 }
 
-template <typename Set>
-static std::vector<BOutPoly> getBoostPolygons(const Set& set) {
-    std::vector<BOutPoly> polys;
+template <typename Set, typename OutPoly>
+static std::vector<OutPoly> getBoostPolygons(const Set& set) {
+    std::vector<OutPoly> polys;
     set.get(polys);
     return polys;
 }
 
-static std::vector<PointArray> convertBoostPolygonsToPointArrays(const std::vector<BOutPoly>& polys) {
+static std::vector<BPoly90> getBoostPolygons90(const BSet90& set, std::size_t vertexThreshold) {
+    std::vector<BPoly90> polys;
+    if (vertexThreshold == 0) {
+        set.get(polys);
+    } else {
+        set.get(polys, vertexThreshold);
+    }
+    return polys;
+}
+
+template <typename BoostPoly>
+static std::vector<PointArray> convertBoostPolygonsToPointArrays(const std::vector<BoostPoly>& polys) {
     std::vector<PointArray> out;
     out.reserve(polys.size());
     for (std::size_t i = 0; i < polys.size(); ++i) {
         std::vector<Point> pts;
-        for (bp::polygon_traits<BOutPoly>::iterator_type it = bp::begin_points(polys[i]);
+        for (typename bp::polygon_traits<BoostPoly>::iterator_type it = bp::begin_points(polys[i]);
              it != bp::end_points(polys[i]); ++it) {
             pts.push_back(Point(bp::get(*it, bp::HORIZONTAL), bp::get(*it, bp::VERTICAL)));
         }
@@ -333,7 +344,8 @@ static std::vector<PointArray> convertBoostPolygonsToPointArrays(const std::vect
 
 static BooleanResult booleanAuto(const std::vector<PointArray>& lhs,
                                 const std::vector<PointArray>& rhs,
-                                BooleanOp op) {
+                                BooleanOp op,
+                                std::size_t getVertexThreshold = 0) {
     BooleanResult result;
 
     double t0 = nowMs();
@@ -348,7 +360,7 @@ static BooleanResult booleanAuto(const std::vector<PointArray>& lhs,
         BSet90 out = applyBoolean(a, b, op);
         double t2 = nowMs();
 
-        std::vector<BOutPoly> boostPolys = getBoostPolygons(out);
+        std::vector<BPoly90> boostPolys = getBoostPolygons90(out, getVertexThreshold);
         double t3 = nowMs();
 
         result.polygons = convertBoostPolygonsToPointArrays(boostPolys);
@@ -367,7 +379,7 @@ static BooleanResult booleanAuto(const std::vector<PointArray>& lhs,
         BSet45 out = applyBoolean(a, b, op);
         double t2 = nowMs();
 
-        std::vector<BOutPoly> boostPolys = getBoostPolygons(out);
+        std::vector<BOutPoly> boostPolys = getBoostPolygons<BSet45, BOutPoly>(out);
         double t3 = nowMs();
 
         result.polygons = convertBoostPolygonsToPointArrays(boostPolys);
@@ -386,7 +398,7 @@ static BooleanResult booleanAuto(const std::vector<PointArray>& lhs,
         BSetAny out = applyBoolean(a, b, op);
         double t2 = nowMs();
 
-        std::vector<BOutPoly> boostPolys = getBoostPolygons(out);
+        std::vector<BOutPoly> boostPolys = getBoostPolygons<BSetAny, BOutPoly>(out);
         double t3 = nowMs();
 
         result.polygons = convertBoostPolygonsToPointArrays(boostPolys);
@@ -452,11 +464,11 @@ static std::size_t countPoints(const std::vector<PointArray>& polys) {
     return n;
 }
 
-static void bench(const std::string& label, const Dataset& d, int rounds) {
+static void bench(const std::string& label, const Dataset& d, int rounds, std::size_t getVertexThreshold) {
     double best = std::numeric_limits<double>::max();
     BooleanResult bestResult;
     for (int r = 0; r < rounds; ++r) {
-        BooleanResult current = booleanAuto(d.lhs, d.rhs, BooleanOp::Or);
+        BooleanResult current = booleanAuto(d.lhs, d.rhs, BooleanOp::Or, getVertexThreshold);
         const double total = current.timing.totalMs();
         if (total < best) {
             best = total;
@@ -490,10 +502,12 @@ int main(int argc, char** argv) {
     try {
         int count = 1000000;
         int rounds = 1;
+        std::size_t getVertexThreshold = 0;
         if (argc > 1) count = std::atoi(argv[1]);
         if (argc > 2) rounds = std::atoi(argv[2]);
+        if (argc > 3) getVertexThreshold = static_cast<std::size_t>(std::strtoull(argv[3], NULL, 10));
         if (count <= 0 || rounds <= 0) {
-            throw std::invalid_argument("usage: ./pointarray_boost_boolean_benchmark [polygon_count] [rounds]");
+            throw std::invalid_argument("usage: ./pointarray_boost_boolean_benchmark [polygon_count] [rounds] [polygon90_get_vertex_threshold]");
         }
 
         pointarray_boolean::sanityCheck();
@@ -504,6 +518,10 @@ int main(int argc, char** argv) {
         std::cout << "PointArray Boost.Polygon auto-dispatch benchmark, op=OR, best-of=" << rounds << "\n";
         std::cout << "Timing columns are milliseconds: total = input conversion + boolean + get + output conversion.\n";
         std::cout << "input conversion includes geometry classification and PointArray->Boost insertion.\n";
+        if (getVertexThreshold != 0) {
+            std::cout << "polygon_90_set_data get vertex threshold=" << getVertexThreshold
+                      << " (only the 90-degree engine supports this Boost overload).\n";
+        }
         std::cout << std::left << std::setw(20) << "dataset"
                   << std::setw(24) << "selected engine"
                   << std::right << std::setw(11) << "total"
@@ -513,9 +531,9 @@ int main(int argc, char** argv) {
                   << std::setw(11) << "out_conv"
                   << std::setw(12) << "out polys"
                   << std::setw(12) << "out points" << '\n';
-        pointarray_boolean::bench("90 rectilinear", d90, rounds);
-        pointarray_boolean::bench("45 mixed", d45, rounds);
-        pointarray_boolean::bench("any angle mixed", any, rounds);
+        pointarray_boolean::bench("90 rectilinear", d90, rounds, getVertexThreshold);
+        pointarray_boolean::bench("45 mixed", d45, rounds, getVertexThreshold);
+        pointarray_boolean::bench("any angle mixed", any, rounds, getVertexThreshold);
         return 0;
     } catch (const std::exception& e) {
         std::cerr << "error: " << e.what() << '\n';
