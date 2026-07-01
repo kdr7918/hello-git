@@ -2,7 +2,6 @@
 
 > GDSII Stream Format — IC 레이아웃 파일 포맷의 완전한 기술 명세
 > GDSII = Graphics Design System II (구 EDA 툴 포맷, 현재 Calma GDSII로도 알려짐)
-> 분석 기준: [anuvad](https://github.com/kdr7918/anuvad) 프로젝트의 libgdsii 소스코드 (SoftJin Infotech)
 
 ---
 
@@ -636,17 +635,3 @@ endLibrary()
 | `ascii2gds` | ASCII 텍스트 → GDSII 바이너리 변환 |
 | `gds-cells` | GDSII 파일의 모든 구조체 이름 출력 |
 | `gds-dot` | 구조체 참조 그래프 → Graphviz DOT 형식 출력 |
-
----
-
-## 14. 참고 자료
-
-- 공식 GDSII Stream Format Specification (검색: "gdsii stream format")
-- [anuvad 프로젝트](https://github.com/kdr7918/anuvad) — 이 문서의 분석 기준 소스코드
-- SoftJin libgdsii — C++ GDSII 라이브러리 (BSD-style 라이선스)
-- GDSII는 Calma사가 개발, 현재는 Cadence Design Systems가 소유
-
----
-
-*이 문서는 anuvad 프로젝트의 `src/gdsii/` 소스코드 분석을 기반으로 작성되었습니다.*
-*GDSII Stream Format (Calma GDSII) — 반도체 IC 레이아웃의 사실상 표준(de facto standard) 바이너리 포맷*
