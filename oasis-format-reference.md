@@ -7,20 +7,20 @@
 
 ## 1. 개요 (Overview)
 
-OASIS는 **SEMI (Semiconductor Equipment and Materials International)** 에서 제정한 IC 레이아웃 파일 포맷이다 Լ G차세대 표준이다. GDSII보다 파일 크기를 획기적으로 줄이고 더 다양한 기하학적 표현을 지원한다.
+OASIS는 **SEMI (Semiconductor Equipment and Materials International)** 에서 제정한 IC 레이아웃 파일 포맷이다. 차세대 표준이다. GDSII보다 파일 크기를 획기적으로 줄이고 더 다양한 기하학적 표현을 지원한다.
 
 ### 1.1 GDSII vs OASIS 비교
 
 | 항목 | GDSII | OASIS |
 |---|---|---|
 | 제정 | Calma (1980년대) | SEMI P39-0304 (2000년대) |
-| 파일 구조 | 고정된 4BCore바이트 레코드 헤더 | **가변코드 레코드**, 고정 헤더 없음 |
+| 파일 구조 | 고정된 4바이트 레코드 헤더 | **가변코드 레코드**, 고정 헤더 없음 |
 | 정수 인코딩 | 고정 2/4바이트 (Big-endian) | **가변길이 unsigned integer** (압축 효율 ↑) |
-| 좌표 | 간: 절대 좌표 (x,y INT) |절:절대/상대 + **Delta 인코딩** (방향+거리) |
-| 문자열 | 리터리تنل 반복 | **참조 번호**로 한 번만 저장 |
+| 좌표 | | 좌표 | 절대 좌표 (x,y INT) | 절대/상대 + **Delta 인코딩** (방향+거리) |
+| 문자열 | 문자열 반복 | **참조 번호**로 한 번만 저장 |
 | 반복 요소 | AREF만 지원 | **12가지 Repetition** 타입 |
 | 중복 값 | 모두 명시적 | **Modal 변수** (생략 시 이전 값 재사용) |
-| 실수 | IBM 370 8바이트 전용 | IBM 370 + 정수/역еню/비율/float32/float64 |
+| 실수 | IBM 370 8바이트 전용 | IBM 370 + 정수/역수/비율/float32/float64 |
 | 압축 | gzip (파일 전체) | **CBLOCK** 단위 DEFLATE 압축 |
 | 기하 요소 | BOUNDARY, PATH, SREF, AREF, TEXT, NODE, BOX | PLACEMENT, TEXT, RECTANGLE, POLYGON, PATH, TRAPEZOID (3종), CTRAPEZOID, CIRCLE, XGEOMETRY |
 | 검증 | 없음 | CRC32 / Checksum32 (END record) |
@@ -66,7 +66,7 @@ OASIS은 **가변길이 부호 없는 정수(unsigned integer)** 를 기본으�
 - n바이트: 하위 7비트씩, MSB가 연속 비트. 마지막 바이트의 MSB=0.
 
 ```
-예: 0x81 0x02 = (1<<7 | 1) << 7 | 2 języka = 129 << 7 | 2 = 16514
+예: 0x81 0x02 = (1<<7 | 1) << 7 | 2 = 129 << 7 | 2 = 16514
 ```
 
 ### 2.2 부호 있는 정수 (Signed Integer)
@@ -95,7 +95,7 @@ OASIS 실수는 타입 태그(0~7)로 시작한다 (명세 Table 7-3):
 | 2 | `PosReciprocal` | 양의 역수 | — | `10` (→ 1/10 = 0.1) |
 | 3 | `NegReciprocal` | 음의 역수 | — | `10` (→ -1/10 = -0.1) |
 | 4 | `PosRatio` | 양의 비율 n/d | n, d | `1/3` |
-| 5 | `NegRatio` | 음의 비율是两个n/d | n, d | `2/7` (→ -2/7) |
+| 5 | `NegRatio` | 음의 비율 n/d | n, d | `2/7` (→ -2/7) |
 | 6 | `Float32` | IEEE 754 단정도 | 4바이트 | `3.14f` |
 | 7 | `Float64` | IEEE 754 배정도 + IBM 370 | 8바이트 | `3.14159` |
 
@@ -140,7 +140,7 @@ enum Direction {
 
 ### 3.2 이름 레코드 (Name Records)
 
-이름은 **참조 번호(reference-number)** 로 저장되어输送 U최대 6가지 이름 테이블이 있다:
+이름은 **참조 번호(reference-number)** 로 저장되어 최대 6가지 이름 테이블이 있다:
 
 | ID | enum | 설명 | 필드 |
 |---|---|---|---|
@@ -182,7 +182,7 @@ enum Direction {
 | 21 | **POLYGON** | 다각형 | `00PXYRDL` |
 | 22 | **PATH** | 패스/배선 | `EWPXYRDL` |
 | 23 | **TRAPEZOID** | 사다리꼴 (delta-a, delta-b) | `OWHXYRDL` |
-| 24 | **TRAPEZOID_A** | 사다리꼴 A (delta-a) | `OWHXYَيْRDL` |
+| 24 | **TRAPEZOID_A** | 사다리꼴 A (delta-a) | `OWHXYRDL` |
 | 25 | **TRAPEZOID_B** | 사다리꼴 B (delta-b) | `OWHXYRDL` |
 | 26 | **CTRAPEZOID** | 합성 사다리꼴 | `TWHXYRDL` |
 | 27 | **CIRCLE** | 원 | `00rXYRDL` |
@@ -193,7 +193,7 @@ enum Direction {
 
 | ID | enum | 설명 | info-byte |
 |---|---|---|---|
-| 28 | **PROPERTY** | 프로퍼티 (하나 이상의 값) | `UUU룰VCNS` |
+| 28 | **PROPERTY** | 프로퍼티 (하나 이상의 값) | `UUUVCN` |
 | 29 | **PROPERTY_REPEAT** | 이전 프로퍼티 재사용 | `UUUUVCNS` |
 
 ### 3.7 ASCII 전용 의사 레코드 (Pseudo Records)
@@ -214,12 +214,12 @@ ASCII 표현에서만 사용되며 바이너리에 직접 존재하지 않는다
 
 ## 4. Info-byte 시스템 (핵심 압축 메커니즘)
 
-OASIS의 가장 강력한 압축 기법이다. 각 엘리먼트 레코드와 PROPERTY 레코드는 **info-byte**라는 1바이트 비트마스크로 시작한다. info-byte의 각 비트는 특정 필드가 이 레코드에 **명시적으로 포함되었는지** 나타낸влим. 생략된 thankill면 해당 **Modal 변수**의 이전 값이Simple 재사용된다.
+OASIS의 가장 강력한 압축 기법이다. 각 엘리먼트 레코드와 PROPERTY 레코드는 **info-byte**라는 1바이트 비트마스크로 시작한다. info-byte의 각 비트는 특정 필드가 이 레코드에 **명시적으로 포함되었는지** 나타낸다. 생략된 경우 해당 **Modal 변수**의 이전 값이 재사용된다.
 
 ### 4.1 PLACEMENT Info-byte (17, 18)
 
 ```
-CNXYRAAF  (type 17, angle은 AA 2伊利codification: 00=0°, 01=90°, 10=180°, 11=270°)
+CNXYRAAF  (type 17, angle은 AA 2-bit encoding: 00=0°, 01=90°, 10=180°, 11=270°)
 CNXYRMAF  (type 18, 명시적 MAG/ANGLE)
 
 bit 7 (C): CellExplicit — 1=셀 이름 명시, 0=modal 재사용
@@ -235,13 +235,13 @@ bit 0 (F): Flip — 1=반사(flip), 0=normal
 ### 4.2 TEXT Info-byte (19)
 
 ```
-bit 6 (C): TextExplicit — 营业收入=텍스트 명시
+bit 6 (C): TextExplicit — 1=텍스트 명시
 bit 5 (N): Refnum
 bit 4 (X): X
 bit 3 (Y): Y
 bit 2 (R): Rep
 bit 1 (T): Texttype — 1=텍스트타입 명시
-bit 0 (L): Textlayer — 营业收入=텍스트레이어 명시
+bit 0 (L): Textlayer — 1=텍스트레이어 명시
 ```
 
 ### 4.3 RECTANGLE Info-byte (20)
@@ -271,7 +271,7 @@ bit 0 (L): usheredLayer
 ### 4.5 PATH Info-byte (22)
 
 ```
-bit 7 (E): Extension — 营业=extension scheme 명시
+bit 7 (E): Extension — 1=extension scheme 명시
 bit 6 (W): Halfwidth — 1=반폭 명시
 bit 5 (P): PointList — 1=포인트리스트 명시
 bit 4 (X): X
@@ -280,7 +280,7 @@ bit 2 (R): Rep
 bit 1 (D): Datatype
 bit 0 (L): Layer
 
-Extension Scheme (E=1일 때): SSE保
+Extension Scheme (E=1일 때): SS
   SS (bits5-4): 시작 확장 방식 (00=reuse, 01=<|place_holder_mm_span_0159|>/, 10EMS=halfwidth, 11=explicit)
   EE (bits1-0): 끝 확장 방식 (동일)
 ```
@@ -301,7 +301,7 @@ bit 0 (L): Layer
 ### 4.7 CTRAPEZOID Info-byte (26)
 
 ```
-bit 7 (T): TrapType — 营业收入=ctrapezoid-type 명시
+bit 7 (T): TrapType — 1=ctrapezoid-type 명시
 bit 6 (W): Width
 bit 5 (H): Height
 bit 4 (X): X
@@ -314,7 +314,7 @@ bit 0 (L): Layer
 ### 4.8 CIRCLE Info-byte (27)
 
 ```
-bit 5 (r): Radius — 营业收入=반지름 명시
+bit 5 (r): Radius — 1=반지름 명시
 bit 4 (X): X
 bit 3 (Y): Y
 bit 2 (R): Rep
@@ -326,8 +326,8 @@ bit 0 (L): Layer
 
 ```
 bits 7-4 (UUUU): ValueCount — 값 개수 (0-14=직접, 15=count 필드 사용)
-bit 3 (V): ReuseValue — 营业收入=이전 값리스트 재사용
-bit 2 (N): NameExplicit — 营业收入=이름 명시 (0=이전 이름 재사용)
+bit 3 (V): ReuseValue — 1=이전 값리스트 재사용
+bit 2 (N): NameExplicit — 1=이름 명시 (0=이전 이름 재사용)
 bit 1 (R): Refnum — 1=참조 번호로 이름 지정
 bit 0 (S): Standard — 1=표준 프로퍼티
 ```
@@ -346,7 +346,7 @@ bit 0 (L): Layer
 
 ## 5. Modal 변수 시스템 (Modal Variables)
 
-Modal 변수는 OASIS 파싱 중 **현재 값의 컨텍스트**를 유지由. 레코드가 특정 필드를 생략하면 해당 Modal 변수의 현재 값이 자동으로 사용된다. 초기값은 모두 udefined이며, 첫 번째 명시적 할당Lanc 정의된다.
+Modal 변수는 OASIS 파싱 중 **현재 값의 컨텍스트**를 유지된다. 레코드가 특정 필드를 생략하면 해당 Modal 변수의 현재 값이 자동으로 사용된다. 초기값은 모두 undefined이며, 첫 번째 명시적 할당으로 정의된다.
 
 ### 5.1 모든 Modal 변수 목록
 
@@ -357,14 +357,14 @@ Modal 변수는 OASIS 파싱 중 **현재 값의 컨텍스트**를 유지由. �
 | `placementCell` | CellName* | 배치될 셀 이름 | PLACEMENT/CELL |
 | `repetition` | Repetition | 반복 패턴 | 모든 엘리먼트 |
 | `layer` | unsigned | 레이어 번호 | RECTANGLE/POLYGON/PATH/TRAPEZOID/CIRCLE/XGEOMETRY |
-| `datatype`稳态| unsigned | 데이터 타입 | RECTANGLE/POLYGON/PATH/TRAPEZOID/CIRCLE/XGEOMETRY |
+| `datatype` | unsigned | 데이터 타입 | RECTANGLE/POLYGON/PATH/TRAPEZOID/CIRCLE/XGEOMETRY |
 | `geometryX` | signed long | 기하 요소 X 좌표 | 모든 기하 엘리먼트 |
 | `geometryY` | signed long | 기하 요소 Y 좌표 | 모든 기하 엘리먼트 |
 | `geometryWidth` | unsigned long | 너비 | RECTANGLE/TRAPEZOID/CTRAPEZOID |
 | `geometryHeight` | unsigned long | 높이 | RECTANGLE/TRAPEZOID/CTRAPEZOID |
 | `xyRelative` | bool | 좌표 모드 (true=상대) | XYRELATIVE/XYABSOLUTE |
 | `textlayer` | unsigned | 텍스트 레이어 | TEXT |
-| `texttype حساب| unsigned | 텍스트 타입 | TEXT |
+| `texttype` | unsigned | 텍스트 타입 | TEXT |
 | `textString` | TextString* | 텍스트 내용 | TEXT |
 | `textX` | signed long | 텍스트 X 좌표 | TEXT |
 | `textY` | signed long | 텍스트 Y 좌표 | TEXT |
@@ -376,7 +376,7 @@ Modal 변수는 OASIS 파싱 중 **현재 값의 컨텍스트**를 유지由. �
 | `ctrapezoidType` | unsigned | 복합 사다리꼴 타입 | CTRAPEZOID |
 | `circleRadius` | unsigned long | 원 반지름 | CIRCLE |
 | `lastPropertyName` | PropName* | 마지막 프로퍼티 이름 | PROPERTY |
-| `propertyIsStandard` | bool | 표준 프로퍼티 여부 낳| PROPERTY |
+| `propertyIsStandard` | bool | 표준 프로퍼티 여부 | PROPERTY |
 | `lastValueList` | PropValueVector | 마지막 프로퍼티 값 목록 | PROPERTY |
 
 ---
@@ -393,12 +393,12 @@ OASIS는 동일한 기하 요소를 여러 번 배치할 때 **반복(Repetition
 | 3 | **UniformY** | dimen, yspace | Y축 균일 간격 열 |
 | 4 | **VaryingX** | dimen, space[0..n-1] | 가변 간격 X행 |
 | 5 | **GridVaryingX** | dimen, grid, space[0..n-1] | 격자 상 가변 X |
-| 6 | **VaryingY 도착| dimen, space[0..n-1] | 가변 간격 Y열 |
+| 6 | **VaryingY | dimen, space[0..n-1] | 가변 간격 Y열 |
 | 7 | **GridVaryingY** | dimen, grid, space[0..n-1] | 격자 상 가변 Y |
 | 8 | **TiltedMatrix**ฝ| ndimen, mdimen, ndelta, mdelta | 기울어진 격자 배열 |
-| 9 | **Diagonal天空中| dimen, delta | 대각선 방향 균일 |
-| 10 | **Arbitrary** | dimen, delta[0..n-1] | 임의一些 위치 |
-| 11 | **GridArbitrary敬业| dimen, grid, delta[0..n-1] 격| 격자 상 임의 위치 |
+| 9 | **Diagonal | dimen, delta | 대각선 방향 균일 |
+| 10 | **Arbitrary** | dimen, delta[0..n-1] | 임의 위치 |
+| 11 | **GridArbitrary | dimen, grid, delta[0..n-1] 격| 격자 상 임의 위치 |
 
 **내부 저장 유형 (4가지로 통합):**
 
@@ -509,7 +509,7 @@ END 레코드에는 파일 무결성 검증을 위한 서명이 포함된다:
 |---|---|---|
 | 0 | 없음 | 검증 안 함 |
 | 1 | CRC32 | 32비트 CRC |
-| 2 | Checksum32 | 32비트 체크�十字|
+| 2 | Checksum32 | 32비트 체크섬|
 
 OASISScanner는 `validateFile()` 메서드로 파일 파싱 중 검증한다.
 
@@ -783,7 +783,7 @@ OASIS 명세 부록 2에서 정의된 표준 프로퍼티들:
 | 프로퍼티 이름 | 설명 |
 |---|---|
 | `MAX_SIGNED_INTEGER_WIDTH` | 최대 부호 정수 비트 수 |
-| `MAX_UNSIGNED_INTEGER_WIDTH` | 최대 부호 없闽 정수 비트 수 |
+| `MAX_UNSIGNED_INTEGER_WIDTH` | 최대 부호 없는 정수 비트 수 |
 | `MAX_STRING_LENGTH` | 최대 문자열 길이 |
 | `POLYGON_MAX_VERTICES` | 폴리곤 최대 꼭짓점 수 |
 | `PATH_MAX_VERTICES` | 패스 최대 꼭짓점 수 |
@@ -802,7 +802,7 @@ OASIS 명세 부록 2에서 정의된 표준 프로퍼티들:
 | `oasis-print` | OASIS 파일을 인간 가독 형식으로 출력 (이름/refnum 해석, modal 변수 적용) |
 | `oasis-validate` | OASIS 파일 검증 서명 확인 |
 | `oasis2ascii` | OASIS 바이너리 → ASCII 텍스트 변환 (재변환 가능) |
-| باع`ascii2oasis` | ASCII 텍스트 → OASIS 바이너리 변환 |
+| `ascii2oasis` | ASCII 텍스트 → OASIS 바이너리 변환 |
 
 ---
 
@@ -813,7 +813,7 @@ OASIS 명세 부록 2에서 정의된 표준 프로퍼티들:
 | **파일 크기** | 큼 | 보통 1/5 ~ 1/10 | 저장 공간/전송 효율 ↑ |
 | **인코딩** | 고정폭 | 가변폭 | 압축 효율 ↑ |
 | **중복 제거** | 없음 | Modal 변수 + Refnum | 반복 값 생략 |
-| **좌표** | 절대 (4B x,y) | 상대/절대 + Delta | 작은 좌표 변화高效적 |
+| **좌표** | 절대 (4B x,y) | 상대/절대 + Delta | 작은 좌표 변화 효율적 |
 | **반복** | AREF (격자만) | 12종 반복 | 메모리 효율 ↑ |
 | **사다리꼴** | 없음 | 4종 + CTRAPEZOID | OPC/광근사 보정에 유리 |
 | **원** | 없음 | CIRCLE 지원 | 진정한 원 추가 |
