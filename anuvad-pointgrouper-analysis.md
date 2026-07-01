@@ -187,7 +187,119 @@ positions: (0,0) (10,0) (20,0) (30,0) (100,100)
 
 ---
 
-## 6. 임계값 (Thresholds)
+## 6. 알고리즘별 Big O 복잡도
+
+> n = positions 총 개수, N = unique points 개수 (중복 제거 후, N ≤ n)
+> m = Phase 2까지 남은 miscellaneous points 개수 (m ≤ N)
+
+### 6.1 Constructor — 전체
+
+| optLevel | 연산 | 시간 복잡도 | 공간 복잡도 |
+|---|---|---|---|
+| **0** | 저장만 함 | **O(1)** | O(1) |
+| **1** | sort + unique + GCD | **O(n log n)** (sort 지배) | O(1) (in-place sort) |
+| **> 1** | sort + unique + makeSparseMatrix + GCD | **O(n log n)** (sort 지배) | **O(N)** (MatrixElement × N) |
+
+### 6.2 `makeSparseMatrix()` — optLevel > 1
+
+```
+입력: 정렬된 unique points N개
+```
+
+| 단계 | 연산 | 시간 | 설명 |
+|---|---|---|---|
+| MatrixElement 생성 | N회 push_back | **O(N)** | 각 점마다 1회 |
+| 중복 분리 | 선형 스캔 | O(N) | duplicates vector로 이동 |
+| right 포인터 설정 | sequential scan | **O(N)** | `next->y == elem->y` 검사 |
+| up 포인터 설정 | HashMap N회 | **O(N) 평균** | colMap[elem->x] lookup + insert |
+| **합계** | | **O(N)** | |
+
+- `HashMap<int, MatrixElement*>`의 lookup/insert는 평균 **O(1)**
+- 공간: colMap에 최대 N개 entry = **O(N)** 추가
+
+### 6.3 `makeRepetition()` — 전체 호출 누적 (amortized)
+
+makeRepetition()은 empty()까지 **여러 번 호출**됨. 아래 분석은 모든 호출의 총합.
+
+#### Phase 1: Sparse Matrix 스캔 (optLevel > 1)
+
+```
+시나리오 1: 완전한 M×K 격자 (N = M×K)
+```
+
+| 단계 | 최악 시간 | 실제 |
+|---|---|---|
+| `tryArray(start)` 첫 호출 | **O(M×K)** = **O(N)** | countRight: O(K), countUp: O(M), growArrayUp: O(M×K) |
+| allocArray | O(M×K) | 모든 점 allocated 표시 |
+| **합계** | **O(N)** | 한 번에 모든 점 소진 |
+
+```
+시나리오 2: 패턴 없는 흩어진 점 (N개 모두 isolated)
+```
+
+| 단계 | 각 element | N개 총합 |
+|---|---|---|
+| `tryArray(elem)` | right 링크 없음 → countRight=1 | O(N) |
+| | up 링크 없음 → countUp=1 | O(N) |
+| | `1×1=1 < 8` → 실패 → points로 이동 | O(N) |
+| **합계** | **O(1)** per element | **O(N)** |
+
+```
+시나리오 3: 부분적 격자 + scattered (혼합)
+```
+
+각 element는 최초 1회만 tryArray()에서 처리:
+- Array로 발견되면 한꺼번에 N_sub개 할당 → 해당 점들은 이후 skip
+- Array가 아니면 O(1)에 실패 → points로 이동
+
+**Amortized total: O(N)** (각 점은 상수 번 검사되고 할당됨)
+
+#### Phase 2: 남은 점 (miscellaneous points)
+
+| 단계 | 연산 | 시간 복잡도 |
+|---|---|---|
+| `tryHorizontalRepetition()` | 모든 남은 점 스캔 (y 동일 여부) | **O(m)** |
+| `tryVerticalRepetition()` | 모든 남은 점 스캔 (x 동일 여부) | **O(m)** (horizontal 실패 시만) |
+| VaryingX/Y or Arbitrary 구성 | delta 리스트 구축 + Repetition.addDelta() | **O(m)** |
+| **합계** | | **O(m)** |
+
+### 6.4 `tryArray()` 단일 호출 상세
+
+```
+elem → countRight → O(K)  (같은 row에서 right 연속 개수)
+     → countUp    → O(M)  (같은 column에서 up 연속 개수)
+     → growArrayUp   → O(K × M) worst (K개 column 각각 M번 up 체크)
+     → growArrayRight → O(K × M) worst (M개 row 각각 K번 right 체크)
+     → allocArray     → O(K × M)
+```
+
+**최악: O(K×M) = O(array area)**. 그러나:
+- 성공 시 K×M개 점이 한 번에 할당 → 점당 **amortized O(1)**
+- 실패 시 K 또는 M이 작아서 실패 (1×N < 8 등) → 실제 **O(1) ~ O(K+M)**
+
+### 6.5 `tryHorizontalLine()` / `tryVerticalLine()` 단일 호출
+
+```
+tryHorizontalRepetition():
+  → 모든 점 y 동일 여부 스캔: O(m)
+  → delta 리스트 구축 (X only): O(m)
+```
+
+**O(m)**, 단 1회만 호출됨.
+
+### 6.6 전체 요약 (All optLevel)
+
+| optLevel | 총 시간 | 총 공간 | 특징 |
+|---|---|---|---|
+| **0** | **O(n)** (Rep_Arbitrary addDelta) | O(n) (positions vector) | 최적화 없음, zlib에 의존 |
+| **1** | **O(n log n)** (sort 지배) | O(n) | grid 기반 약한 최적화 |
+| **> 1** | **O(n log n)** (sort) + **O(N)** (matrix) | **O(N)** | 강한 최적화, 대부분의 케이스에서 선형 |
+
+**결론:** PointGrouper의 모든 연산은 **O(n log n)** 이하이며, 실제 패턴 탐색은 **amortized O(N)**. n=300,000 (MaxBufferedElements) 기준으로도 sort 이외의 오버헤드는 무시할 수준.
+
+---
+
+## 7. 임계값 (Thresholds)
 
 ```cpp
 const Uint MinArrayPoints = 8;    // Matrix로 묶을 최소 점 개수
@@ -201,7 +313,7 @@ const Uint MinLinePoints  = 6;    // UniformX/Y로 묶을 최소 점 개수
 
 ---
 
-## 7. grid 계산 (GCD 기반)
+## 8. grid 계산 (GCD 기반)
 
 ```cpp
 grid = GCD(grid, GCD(iter->x, iter->y));  // 모든 좌표의 GCD
@@ -215,7 +327,7 @@ grid = GCD(grid, GCD(iter->x, iter->y));  // 모든 좌표의 GCD
 
 ---
 
-## 8. overflow 안전장치
+## 9. overflow 안전장치
 
 GDSII 좌표는 int32 (-2^31 ~ 2^31-1). OASIS delta로 변환 시 overflow 가능:
 
@@ -230,7 +342,7 @@ delta가 overflow 위험이 있으면 해당 점을 Repetition에서 제외.
 
 ---
 
-## 9. 상대좌표 모드와의 협력
+## 10. 상대좌표 모드와의 협력
 
 PointGrouper가 반환한 `pos`(origin)는 `GdsToOasisConverter::writeXxx()`에서 `placementPos`/`textPos`/`geometryPos`와 비교됨:
 
@@ -249,7 +361,7 @@ while (!pg.empty()) {
 
 ---
 
-## 10. PointGrouper vs AREF
+## 11. PointGrouper vs AREF
 
 PointGrouper가 필요 없는 유일한 element 타입: **AREF**
 
@@ -261,7 +373,7 @@ PointGrouper가 필요 없는 유일한 element 타입: **AREF**
 
 ---
 
-## 11. 요약: 전체 최적화 파이프라인
+## 12. 요약: 전체 최적화 파이프라인
 
 ```
 GDSII file
