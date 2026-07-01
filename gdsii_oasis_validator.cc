@@ -15,11 +15,74 @@
 #include <fcntl.h>
 #include <unistd.h>
 
+
 static void die(const char* m) {
     fprintf(stderr, "ERROR: %s\n", m); exit(1);
 }
 
-// GDSII record types: name, valid, dtype, iSize, minBody, maxBody
+
+// -------------------------------------------------------------------
+// Format detection
+// -------------------------------------------------------------------
+
+// OASIS magic string: 13 bytes at the start of every OASIS file.
+static const char OASIS_MAGIC[] = "%SEMI-OASIS\r\n";
+
+enum Format { FMT_UNKNOWN, FMT_GDSII, FMT_OASIS };
+
+// detect_format -- determine whether a file is GDSII or OASIS.
+//
+//  Detection logic:
+//    1. Read the first 13 bytes.
+//    2. If they match the OASIS magic "%SEMI-OASIS\r\n" → OASIS.
+//    3. Otherwise, attempt GDSII parsing on the first 4-byte record
+//       header:  [length-BE(2B) | record-type(1B) | data-type(1B)].
+//       A valid GDSII file always starts with a HEADER record:
+//         - length >= 4  (header + body) and even
+//         - record type = 0  (GRT_HEADER)
+//         - data type  = 2  (GDATA_SHORT / 2-byte integer)
+//         - body length = 2  (HEADER holds exactly one int16 version number)
+//    4. If neither matches → UNKNOWN.
+
+static Format detect_format(const char* path) {
+    int fd = ::open(path, O_RDONLY);
+    if (fd < 0)
+        die("can't open");
+
+    uint8_t buf[13];
+    ssize_t n = ::read(fd, buf, 13);
+    ::close(fd);
+
+    if (n < 13)
+        return FMT_UNKNOWN;   // file too small for any known format
+
+    // 1) OASIS: check 13-byte magic string
+    if (memcmp(buf, OASIS_MAGIC, 13) == 0)
+        return FMT_OASIS;
+
+    // 2) GDSII: first 4 bytes must be a valid HEADER record
+    int recLen   = (buf[0] << 8) | buf[1];   // big-endian uint16
+    int recType  = buf[2];
+    int dataType = buf[3];
+
+    // HEADER:  type=0, datatype=SHORT(2), body must be exactly 2 bytes
+    if (recLen >= 4 && (recLen % 2) == 0 &&
+        recType == 0 && dataType == 2 &&
+        (recLen - 4) == 2)
+    {
+        return FMT_GDSII;
+    }
+
+    return FMT_UNKNOWN;
+}
+
+
+// -------------------------------------------------------------------
+// GDSII validator
+// -------------------------------------------------------------------
+
+// GDSII record descriptor: name, valid flag, data-type, item-size,
+// min-body-length, max-body-length.
 struct Rt { const char* n; int v; int d; int sz; int mn; int mx; };
 static const Rt gds[] = {
   {"HDR",1,2,2,2,2},  {"BGNLIB",1,2,2,24,24},
@@ -43,6 +106,7 @@ static const Rt gds[] = {
   {"ENDEXTN",1,3,4,4,4},  {"TEXTNODE",1,0,0,0,0},
 };
 static const int NG = sizeof(gds)/sizeof(gds[0]);
+
 
 static int chk_gds(const char* path) {
     int fd = ::open(path, O_RDONLY);
@@ -72,19 +136,24 @@ static int chk_gds(const char* path) {
     return err;
 }
 
+
+// -------------------------------------------------------------------
+// OASIS validator
+// -------------------------------------------------------------------
+
 static int chk_oas(const char* path) {
     int fd = ::open(path, O_RDONLY);
     if (fd < 0) { die("can't open"); return 1; }
     off_t sz = ::lseek(fd, 0, SEEK_END);
     ::lseek(fd, 0, SEEK_SET);
     printf("OASIS file, %ld bytes\n", (long)sz);
-    // Check magic
+
+    // Check 13-byte magic string
     char magic[13];
     if (::read(fd, magic, 13) != 13) {
         die("can't read magic"); return 1;
     }
-    const char* M = "%SEMI-OAS IS\r\n";
-    if (memcmp(magic, M, 13) != 0) {
+    if (memcmp(magic, OASIS_MAGIC, 13) != 0) {
         printf("  ERR: bad magic string\n"); return 1;
     }
     printf("  Magic OK\n");
@@ -92,18 +161,24 @@ static int chk_oas(const char* path) {
     return 0;
 }
 
+
+// -------------------------------------------------------------------
+// Main
+// -------------------------------------------------------------------
+
 int main(int argc, char** argv) {
     if (argc < 2) { die("usage: ./validator <file>"); return 1; }
-    const char* p = argv[1];
-    printf("File: %s\n", p);
-    // detect format by magic
-    int fd = ::open(p, O_RDONLY);
-    if (fd < 0) die("can't open");
-    char m[13] = {};
-    ::read(fd, m, 13);
-    ::close(fd);
-    const char* MO = "%SEMI-OAS IS\r\n";
-    int isoas = (memcmp(m, MO, 13) == 0);
-    if (isoas) return chk_oas(p);
-    else return chk_gds(p);
+    const char* path = argv[1];
+    printf("File: %s\n", path);
+
+    Format fmt = detect_format(path);
+
+    if (fmt == FMT_OASIS) {
+        return chk_oas(path);
+    } else if (fmt == FMT_GDSII) {
+        return chk_gds(path);
+    } else {
+        printf("  UNKNOWN: not a valid GDSII or OASIS file\n");
+        return 1;
+    }
 }
