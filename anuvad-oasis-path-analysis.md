@@ -1,296 +1,241 @@
-# OASIS Path — 기하학 정의와 중심선 정점(점열) 계산
+# OASIS Path — 기하학적 의미와 Outline(외곽 폴리곤) 변환 방식
 
 > 대상 소스: `src/oasis/records.h` (PathRecord), `src/oasis/element.h` (PathElem),
-> `src/oasis/element.cc` (decodePointList), `src/oasis/oasis.h` (PointList)
+> `src/oasis/layout-builder.cc` (beginPath / bbox 확장), `src/oasis/creator.cc` (기록),
+> `src/oasis/oasis.h` (PointList)
 > 프로젝트: Anuvad (IC 레이아웃 포맷 GDSII/OASIS 변환 C++ 라이브러리)
-> 작성일: 2026-07-09
-> 집중: 기하학 정의 + 중심선 정점(점열) 계산 로직 (코드 포함 상세 설명)
-> (Trapezoid 분석 문서와 동일한 구성으로 작성)
+> 작성일: 2026-07-09 (개정 — 기하학 의미 + Outline 변환 중점)
+> 집중: Path의 기하학적 정의와, 중심선을 외곽 폴리곤(Outline)으로 변환하는 방식
 
 ---
 
-## 1. 기하학 정의 (OASIS spec §24 / Path Record)
+## 1. 기하학적 의미
 
-OASIS **PATH** 레코드는 일정한 반폭(half-width)을 가진 **중심선(centerline)**
-을 따라 그려지는 선분 도형입니다. 트랜지스터 게이트, 금속 배선 등细长
-도형을 compact하게 표현하는 데 쓰입니다.
+OASIS **PATH** 레코드(spec §24, record id `22`)는 일정한 **반폭(half-width)**
+을 가진 **중심선(centerline)** 을 따라 그려지는 선분 도형입니다. 배선,
+게이트 등 가는 장방형 도형을 중심선 한 줄로 compact하게 표현합니다.
 
-### 1.1 파라미터 구성
+### 1.1 구성 파라미터와 기하학 역할
 
-| 필드 | 타입 | 의미 |
-|------|------|------|
-| `layer` / `datatype` | Ulong | 레이어 / 데이터타입 |
-| `halfwidth` | Ulong | 중심선 양측으로 뻗는 폭의 **절반** (전체 폭 = 2×halfwidth) |
-| `startExtn` | long | 시작점 바깥으로 연장되는 길이 (extension) |
-| `endExtn` | long | 끝점 바깥으로 연장되는 길이 |
-| `x, y` | long | 중심선 **첫 번째 점(anchor)**의 절대 좌표 |
-| `ptlist` | PointList | 첫 점 이후의 상대 변위(delta) 열 |
-
-기하학상 Path는 중심선 점열 `P0, P1, ..., Pn`로 정의되며, 각 선분은
-양측으로 `halfwidth`만큼 평행이동한 외곽 폴리곤으로 렌더링됩니다.
+| 필드 | 기하학 의미 |
+|------|-------------|
+| `x, y` | 중심선 **첫 점(P0)의 절대 좌표** (anchor) |
+| `ptlist` | P0 이후의 상대 변위 열 → 중심선 점들 `P0, P1, ..., Pn` |
+| `halfwidth` | 중심선 양측으로 뻗는 폭의 **절반**. 전체 폭 = `2 × halfwidth` |
+| `startExtn` | 시작점(P0) 바깥으로 중심선을 연장하는 길이 |
+| `endExtn` | 끝점(Pn) 바깥으로 중심선을 연장하는 길이 |
 
 ```
-            halfwidth
-        <-------------->
-        ┌──────────────┐   ┐
-   P0 ──┤  centerline ├──┤   │
-        └──────────────┘   ┘ halfwidth
-              │
-            P1 ... Pn
-
-   시작점: P0 = (x, y)         절대 좌표
-   이후점: Pk = P0 + Σ delta_i  (상대 누적)
+        halfwidth
+     <------------>
+     ┌────────────┐   ← 상단 외곽선 (centerline + halfwidth·normal)
+P0 ──┤  center   ├── P1 ── ... ── Pn
+     └────────────┘   ← 하단 외곽선 (centerline - halfwidth·normal)
+          ↑
+   startExtn (P0 바깥 연장)      endExtn (Pn 바깥 연장)
 ```
 
-### 1.2 중심선 vs 외곽 폴리곤
+### 1.2 세 가지 기하학적 요소
 
-- **중심선(centerline)**: `decodePointList()`가 돌려주는 점열 — 도형의
-  "뼈대".
-- **외곽 폴리곤(outline)**: 중심선 각 선분을 법선 방향으로 `±halfwidth`만큼
-  평행이동해 만든 닫힌 다각형. 실제 채우기(fill)는 이 폴리곤으로 수행.
-- **Extension**: `startExtn`/`endExtn`이 0이 아니면 중심선 끝점을 그 길이만큼
-  연장한 뒤 외곽을 구성합니다(spec §24.3).
-
-> 본 문서는 **중심선 정점(점열) 계산** — 즉 `PointList` 디코딩 — 에 집중하며,
-> 외곽 폴리곤 확장은 renderer/builder 책임입니다.
+1. **중심선(centerline)**: `P0 + 누적(Δ)` 로 얻은 점 열. 도형의 뼈대.
+2. **반폭(halfwidth)**: 중심선에서 수직(법선) 방향으로 양측 `±halfwidth`
+   만큼 떨어진 두 평행선이 외곽을 이룹니다.
+3. **Extension**: `startExtn`/`endExtn`이 0이 아니면 중심선 끝점을 그
+   길이만큼 법선 방향이 아닌 **중심선 방향으로** 연장한 뒤 외곽을 닫습니다
+   (spec §24.3).
 
 ### 1.3 불변 / 제약
 
-- `halfwidth >= 0`. `halfwidth == 0`이면 0폭 선(렌더링 시 invisible 또는
+- `halfwidth >= 0`. `halfwidth == 0` → 0폭 선(렌더링 invisible 또는
   application-dependent).
-- `ptlist`는 최소 1개 이상의 점을 가져야 함(P0는 항상 존재, delta 열은
-  0개 이상).
-- 중심선 점들은 **Manhattan / Octangular / AllAngle** 제약을 가질 수 있음
-  (다음 절의 ListType).
+- 중심선은 **Manhattan / Octangular / AllAngle** 제약을 가질 수 있음
+  (`PointList::ListType`, spec Table 7-7).
+- GDSII와 달리 OASIS Path는 **끝 처리(end-cap) 형태를 명시적으로 가지지
+  않고**, extension 값으로 flush / round / extended 를 흉내냅니다.
 
 ---
 
-## 2. 데이터 구조
+## 2. Outline(외곽 폴리곤) 변환 방식
 
-### 2.1 `PathRecord` (파일 레코드, `records.h`)
+Path를 실제로 채우기(fill)하려면 중심선을 **닫힌 외곽 다각형(Outline
+polygon)** 으로 변환해야 합니다. 변환은 크게 세 단계입니다.
 
-```cpp
-struct PathRecord : public OasisRecord {
-    int         infoByte;
-    Ulong       extnScheme;
-    Ulong       layer;
-    Ulong       datatype;
-    Ulong       halfwidth;
-    long        startExtn;
-    long        endExtn;
-    long        x, y;
-    PointList   ptlist;
-    RawRepetition  rawrep;
+### 2.1 단계 1 — 중심선 점 열 복원
 
-    PathRecord();
-    virtual ~PathRecord();
-};
+`PathElem::decodePointList()`(`element.cc`)가 OASIS 바이너리 Blob을
+`PointList`(상대 Delta 열)로 풉니다. 절대 중심선 좌표는 P0에 누적:
+
+```
+P0 = (x, y)                         // 절대 anchor
+Pk = P0 + Σ_{i<k} Δ_i               // k=1..n
 ```
 
-`infoByte`는 halfwidth/extension 유무와 인코딩 방식을, `extnScheme`은
-start/end extension의 부호 규칙을 인코딩합니다(`creator.cc` 참조).
+`PointList`는 6종 ListType(ManhattanHorizFirst=0, ManhattanVertFirst=1,
+Manhattan=2, Octangular=3, AllAngle=4, AllAngleDoubleDelta=5)으로 인코딩되며,
+각 타입은 기하 제약(수평-수직 교번 / 8방향 / 자유각도)을 가집니다.
 
-### 2.2 `PathElem` (빌드된 요소, `element.h`)
+### 2.2 단계 2 — 각 선분을 ±halfwidth 로 평행이동 (offset / stroke)
 
-```cpp
-struct PathElem : public Element {
-    long     x, y;
-    long     halfwidth;
-    long     startExtn, endExtn;
-    Blob     ptlistBlob;       // raw point-list bytes (OASIS binary encoding)
-    Box      box;              // cached bounding box (computed at build time)
+중심선의 연속된 두 점 `A→B` 각각에 대해, **법선(normal) 방향**으로
+`±halfwidth` 만큼 평행이동한 네 점을 만듭니다.
 
-    PathElem() : x(0), y(0),
-                 halfwidth(0), startExtn(0), endExtn(0) { }
+```
+        B_top = B + hw·n
+        A_top = A + hw·n
+        A_bot = A - hw·n
+        B_bot = B - hw·n
 
-    PointList  decodePointList () const;
-    Box        boundingBox () const { return box; }
-};
+   A_bot ──────────── B_bot      (하단 외곽선)
+    │                 │
+   A ───────────────── B          (중심선)
+    │                 │
+   A_top ──────────── B_top      (상단 외곽선)
 ```
 
-빌드 단계에서는 점열을 **압축 바이너리(`Blob`)로 보관**하고, 필요할 때
-`decodePointList()`로 `PointList`(절대/상대 Delta 벡터)로 풉니다. `box`는
-빌드 시 계산된 bounding box 캐시입니다.
+법선 `n` 은 선분 `B-A`를 90° 회전한 단위 벡터입니다:
+```
+dir = (B.x - A.x, B.y - A.y)
+len = |dir|
+n   = (-dir.y/len, dir.x/len)      // 왼쪽 법선
+```
+모든 선분에 대해 상단점(center + hw·n)과 하단점(center - hw·n)을 모아
+**외곽 다각형의 양쪽 띠(ribbon)** 를 구성합니다.
+
+### 2.3 단계 3 — 끝 처리 (end treatment) 와 닫힘
+
+중심선 끝점(P0, Pn) 부근的外곽을 닫는 방식은 `startExtn`/`endExtn` 값에
+따라 세 가지로 나뉩니다(spec §24.3):
+
+| 케이스 | 기하학 처리 | 외곽 폴리곤 끝 모양 |
+|--------|-------------|---------------------|
+| `extn == 0` | 중심선 끝에서 수직으로 외곽을 닫음 | **Flush** (사각 끝) |
+| `extn == halfwidth` | 끝점을 `halfwidth`만큼 중심선 방향으로 연장 후 닫음 | **Extended** (사각 돌출) |
+| `extn > halfwidth` (>0, ≠hw) | 끝점을 `extn`만큼 연장 | Extended (더 긴 돌출) |
+| round cap | OASIS는 명시 미지원 — application이 호半圆 근사 | Round (근사) |
+
+`creator.cc`의 `setPathStartExtnScheme` / `setPathEndExtnScheme`은 이 값을
+`extnScheme` 바이트의 SS/EE 비트로 인코딩합니다:
+
+```cpp
+// creator.cc:2089
+setPathStartExtnScheme (&extnScheme, startExtn, halfwidth);
+//   startExtn == 0         -> NoExtn (flush)
+//   startExtn == halfwidth -> HalfExtn (자동 extended)
+//   기타                   -> ExplicitExtn (명시값 기록)
+```
+
+### 2.4 전체 Outline 생성 알고리즘 (요약)
+
+```
+1. centerline = [P0, P1, ..., Pn]        // decodePointList + 누적
+2. 시작점 연장: P0' = P0 - startExtn·(P1-P0 방향)   (startExtn>0 시)
+3. 끝점 연장:   Pn' = Pn + endExtn·(Pn-Pn-1 방향)     (endExtn>0 시)
+4. 각 선분 A→B 에 대해:
+     top_A, top_B = A+hw·n, B+hw·n
+     bot_A, bot_B = A-hw·n, B-hw·n
+5. Outline 다각형 =
+     [ top_P0', top_P1, ..., top_Pn',   ← 상단 외곽 (연장 포함)
+       끝 cap (flush/extended),
+       bot_Pn', bot_Pn-1, ..., bot_P0', ← 하단 외곽 (역순)
+       시작 cap (flush/extended) ]      ← 닫힌 링
+```
+
+이 다각형을 렌더러/팬 채우기에 넘기면 Path가 면적으로 그려집니다.
 
 ---
 
-## 3. 중심선 정점(점열) 계산 — `decodePointList()`
+## 3. 라이브러리 내 실제 처리 (Anuvad)
 
-`PathElem::decodePointList()`는 OASIS 바이너리 point-list를 읽어
-`PointList`(Delta 벡터열)로 복원합니다. 반환된 `PointList`의 각 `Delta`는
-**첫 점(P0) 이후의 상대 변위**입니다(절대 좌표는 `P0=(x,y)`에 누적 합산).
-
-### 3.1 전체 소스 코드
-
-아래는 `element.cc`의 실제 구현입니다.
+Anuvad는 Path를 **중심선 + 반폭으로 보관**하며, 외곽 폴리곤으로의 명시적
+변환 함수는 두지 않습니다. 대신 **bounding box 계산 시에만 halfwidth로
+박스를 확장**합니다 (`layout-builder.cc`)：
 
 ```cpp
-PointList
-PathElem::decodePointList () const {
-    if (ptlistBlob.empty()) return PointList();
-
-    BlobReader  reader(ptlistBlob.data, ptlistBlob.data + ptlistBlob.size);
-    Ulong  type = reader.readUInt();
-    Ulong  numDeltas = reader.readUInt();
-
-    PointList  ptlist(static_cast<PointList::ListType>(type));
-
-    switch (static_cast<PointList::ListType>(type)) {
-        case PointList::ManhattanHorizFirst:
-        case PointList::ManhattanVertFirst:
-            for (Ulong i = 0; i < numDeltas; ++i)
-                ptlist.addPoint(Delta(reader.readSInt(), 0));
-            break;
-
-        case PointList::Manhattan: {
-            for (Ulong i = 0; i < numDeltas; ++i) {
-                Ulong  raw = reader.readUInt();
-                Delta::Direction  dirn =
-                    static_cast<Delta::Direction>(raw & 0x3);
-                Ulong  mag = raw >> 2;
-                ptlist.addPoint(Delta(dirn, mag));
-            }
-            break;
-        }
-
-        case PointList::Octangular: {
-            for (Ulong i = 0; i < numDeltas; ++i) {
-                Ulong  raw = reader.readUInt();
-                Delta::Direction  dirn =
-                    static_cast<Delta::Direction>(raw & 0x7);
-                Ulong  mag = raw >> 3;
-                ptlist.addPoint(Delta(dirn, mag));
-            }
-            break;
-        }
-
-        case PointList::AllAngle:
-        case PointList::AllAngleDoubleDelta:
-            for (Ulong i = 0; i < numDeltas; ++i)
-                ptlist.addPoint(reader.readGDelta());
-            break;
+/*virtual*/ void
+LayoutBuilder::beginPath (Ulong layer, Ulong datatype, long x, long y,
+                          long halfwidth, long startExtn, long endExtn,
+                          const PointList&  ptlist, const Repetition*  rep)
+{
+    PathElem*  elem = ly_->pageBuf.construct<PathElem>();
+    elem->x = x; elem->y = y;
+    elem->halfwidth = halfwidth;
+    elem->startExtn = startExtn; elem->endExtn = endExtn;
+    Encbuf  enc; encodePointList(enc, ptlist);
+    elem->ptlistBlob = ly_->blobStore.insert(enc.ptr(), enc.len());
+    Box  box = boxOfPointList(ptlist, x, y);
+    {
+        Point lo = box.min_corner(); Point hi = box.max_corner();
+        bg::expand(box, Point(lo.get<0>() - halfwidth, lo.get<1>() - halfwidth));
+        bg::expand(box, Point(hi.get<0>() + halfwidth, hi.get<1>() + halfwidth));
     }
-
-    return ptlist;
+    elem->box = box;
+    ...
 }
 ```
 
-### 3.2 디코딩 단계별 상세 설명
+**설명:**
+- `boxOfPointList(ptlist, x, y)` — 중심선 점 열의 bbox.
+- `bg::expand` 두 줄이 **중심선 bbox를 각 변方向으로 `halfwidth`만큼
+  팽창**시켜, Path 외곽을 감싸는 bbox를 만듭니다. (extension은 bbox에
+  별도 반영 안 됨 — 근사 bounding box.)
+- 즉 Anuvad는 **"외곽 폴리곤 생성"은 하지 않고, 공간 탐색용 bbox만
+  halfwidth 팽창**합니다. 실제 면 채우기는 다운스트림 툴(GDSII 변환·
+  렌더러)이 §2 알고리즘으로 수행합니다.
 
-1. **BlobReader 구성**: `ptlistBlob`의 시작/끝 포인터로 varint 리더 생성.
-   빈 Blob이면 빈 `PointList` 반환.
-2. **type 읽기**: 맨 앞 varint가 `ListType`(spec Table 7-7).
-3. **numDeltas 읽기**: 중심선 상 두 번째 점부터 끝점까지의 변위 개수.
-   → 전체 중심선 점 수 = `numDeltas + 1` (P0 포함).
-4. **ListType별 점 복원**: 아래 표 참조.
+### 3.1 기록 측 (creator.cc)
 
-### 3.3 `PointList::ListType` — 기하 인코딩 방식
-
-| ListType | 값 | 기하 제약 | 점 인코딩 |
-|----------|----|-----------|-----------|
-| `ManhattanHorizFirst` | 0 | 수평-수직 교번, **첫 변위는 수평** | `readSInt()` → (Δx, 0) |
-| `ManhattanVertFirst`  | 1 | 수평-수직 교번, **첫 변위는 수직** | `readSInt()` → (Δx, 0) |
-| `Manhattan`           | 2 | 8방향 중 4 Manhattan 방향 | 2비트 방향 + 크기(`>>2`) |
-| `Octangular`          | 3 | 8방향(octangular) | 3비트 방향 + 크기(`>>3`) |
-| `AllAngle`            | 4 | 자유 각도 | `readGDelta()` (x,y 모두) |
-| `AllAngleDoubleDelta` | 5 | 자유 각도, 2×정밀도 | `readGDelta()` |
-
-**핵심 관찰:**
-
-- **ManhattanHorizFirst / ManhattanVertFirst** (type 0,1): 교번(alternating)
-  인코딩입니다. 첫 변위는 항상 수평(HorizFirst) 또는 수직(VertFirst)이고,
-  이후 변위는 번갈아 방향이 바뀝니다. 코드에서는 단순히 `(readSInt(), 0)`로
-  읽는데, **실제 방향 교번은 디코딩 후 점들을 연결할 때 적용**됩니다
-  (여기서는 x 변위만 읽고 y=0으로 저장 — caller가 Horiz/VERT 플래그로
-  교번 복원). 주석/사용부에서 방향 플래그를 따릅니다.
-- **Manhattan** (type 2): 각 점을 `raw`로 읽어 하위 2비트를 `Direction`
-  (E/W/N/S), 상위를 크기로 해석. → 좌표계 방향 단위 벡터 × 크기.
-- **Octangular** (type 3): 하위 3비트가 8방향(수평/수직 + 4 대각선),
-  상위를 크기. 대각선은 45° 제약.
-- **AllAngle** (type 4,5): 완전 자유 각도. `readGDelta()`가
-  (x변위, y변위) 쌍을 그대로 읽습니다. type 5는 배정밀도 표현(더 촘촘한
-  그리드).
-
-### 3.4 `Delta` 와 `readGDelta`
-
-`Delta`(`oasis.h`)는 부호 있는 2D 변위 구조체입니다. `readGDelta()`는
-OASIS의 G(general) Delta 인코딩을 풀어줍니다:
-
-```cpp
-Delta  readGDelta () {
-    Ulong  val = readUInt();
-    if ((val & 0x1) == 0) {                    // 방향 인코딩
-        Delta::Direction  dirn =
-            static_cast<Delta::Direction>((val >> 1) & 0x7);
-        return Delta(dirn, val >> 4);
-    }
-    bool  isNeg = (val & 0x2);                 // 자유 (x,y) 인코딩
-    long  xdisp = (isNeg ? -(val >> 2) : (val >> 2));
-    long  ydisp = readSInt();
-    return Delta(xdisp, ydisp);
-}
-```
-
-즉, 대부분의 점은 방향+크기로 압축되고, 가끔 자유 (x,y) 쌍이 섞입니다.
-
-### 3.5 절대 좌표 환원 (중심선 점 계산)
-
-`decodePointList()`가 돌려준 `Delta` 열은 **P0 이후 상대 변위**입니다.
-절대 중심선 좌표는 다음과 같이 누적합니다:
-
-```cpp
-// P0 = 절대 시작점
-Delta  P0(x, y);                      // PathRecord/PathElem의 x, y
-PointList  pl = pathElem.decodePointList();
-
-vector<Delta>  centerline;
-centerline.push_back(P0);
-Delta  cur = P0;
-for (const Delta& d : pl) {           // d = 상대 변위
-    cur += d;                         // 누적 합산 (Delta::operator+=, 오버플로우 검사)
-    centerline.push_back(cur);
-}
-// centerline[] = P0, P1, ..., Pn  (중심선 정점 열)
-```
-
-### 3.6 예시 (ManhattanHorizFirst, halfwidth=5)
-
-중심선 delta 열이 `(10,0), (0,20), (-10,0)` 이고 `P0=(0,0)`이라면:
+`OasisCreator::beginPath`는 spec §27 포맷으로 기록합니다:
 
 ```
-P0 = (0, 0)
-P1 = (10, 0)    Δx=+10 (수평)
-P2 = (10, 20)   Δy=+20 (수직)
-P3 = (0, 20)    Δx=-10 (수평)
+`22' path-info-byte [layer] [datatype] [half-width]
+     [extension-scheme [start-extension] [end-extension]]
+     [point-list] [x] [y] [repetition]
+path-info-byte ::= EWPXYRDL
+```
 
-외곽 폴리곤은 각 선분을 y방향 ±5 (halfwidth) 로 평행이동해 생성:
-  상단: (0,5)-(10,5)-(10,25)-(0,25)
-  하단: (0,-5)-(10,-5)-(10,15)-(0,15)
-  → 닫힌 사각 띠 폴리곤
+`halfwidth`, `extnScheme`, `ptlist`, `x/y`를 차례로 씁니다. 중심선과 반폭을
+그대로 직렬화하므로 파일 크기가 매우 작습니다(외곽 폴리곤 점들을 일일이
+저장하는 GDSII 대비).
+
+---
+
+## 4. 예시
+
+**입력**: `P0=(0,0)`, 중심선 deltas `(10,0),(0,20),(-10,0)`,
+`halfwidth=5`, `startExtn=endExtn=0` (flush).
+
+```
+중심선:  P0(0,0) → P1(10,0) → P2(10,20) → P3(0,20)
+
+Outline (flush cap):
+  상단: (0,5) (10,5) (10,25) (0,25)
+  하단: (0,-5) (10,-5) (10,15) (0,15)
+  닫힌 링:
+   (0,5)→(10,5)→(10,25)→(0,25)→[끝 cap]→(0,15)→(10,15)→(10,-5)→(0,-5)→[시작 cap]→(0,5)
+
+bbox (Anuvad): x∈[-5,15], y∈[-5,25]   (중심선 bbox [0,10]×[0,20] 에 halfwidth 팽창)
 ```
 
 ---
 
-## 4. 요약
+## 5. 요약
 
-- **Path**는 중심선 점열 + `halfwidth` + `startExtn`/`endExtn`으로 정의되는
-  선분 도형(OASIS spec §24).
-- **중심선 정점(점열) 계산**은 `PathElem::decodePointList()`가 수행합니다:
-  OASIS 바이너리 Blob → `PointList`(상대 Delta 열).
-- `PointList`는 6가지 `ListType`(Manhattan / Octangular / AllAngle 등)으로
-  기하 제약별 압축 인코딩을 지원하며, type 0/1은 수평/수직 교번,
-  type 2/3은 방향+크기, type 4/5는 자유 (x,y).
-- 절대 중심선 좌표는 `P0=(x,y)`에 Delta 열을 누적 합산해 얻습니다.
-- 실제 폴리곤 렌더링(채우기)은 중심선을 `±halfwidth`로 평행이동 확장하는
-  별도 단계(renderer/builder)에서 이루어집니다.
+- **Path의 기하학**: 중심선 점 열 + `halfwidth`(반폭) + `start/endExtn`
+  (끝 연장). OASIS는 중심선 한 줄로 배선 도형을 compact 표현.
+- **Outline 변환**: 중심선 각 선분을 법선 방향 `±halfwidth`로 평행이동해
+  외곽 띠를 만들고, 끝점은 `extn` 값에 따라 flush / extended / round 근사로
+  닫아 **닫힌 외곽 다각형**을 생성(§2 알고리즘).
+- **Anuvad 실제 처리**: 외곽 폴리곤 생성은 하지 않음. `layout-builder.cc`가
+  bbox만 `±halfwidth`로 팽창(`bg::expand`)해 공간 탐색용 박스를 만듦.
+  기록은 `creator.cc`가 중심선+반폭을 그대로 직렬화(§27 포맷).
 
 ---
 
 ## 참고: 관련 소스 위치
 
 - `src/oasis/records.h` — `PathRecord` 정의
-- `src/oasis/element.h` — `PathElem` 정의 (`decodePointList` 선언)
-- `src/oasis/element.cc` — `PathElem::decodePointList()` 구현 (위 인용),
-  `BlobReader` / `readGDelta`
-- `src/oasis/oasis.h` — `PointList` 클래스, `ListType` 열거, `Delta` 구조체
-- `src/oasis/creator.cc` — Path 레코드 기록 시 `halfwidth`/`extnScheme` 처리
+- `src/oasis/element.h` — `PathElem` (`decodePointList` 선언, `box` 캐시)
+- `src/oasis/element.cc` — `PathElem::decodePointList()` (중심선 점 열 복원)
+- `src/oasis/layout-builder.cc` — `beginPath`, **bbox에 halfwidth 팽창** (§3 인용)
+- `src/oasis/creator.cc` — `beginPath` 기록(spec §27), `extnScheme` 인코딩
+- `src/oasis/oasis.h` — `PointList`, `ListType`, `Delta`
