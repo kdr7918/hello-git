@@ -51,6 +51,12 @@ int main() {
     RDB_CHECK(result(standard, rule(standard, 0), 0).kind == rdb::ResultKind::Polygon);
     RDB_CHECK(result(standard, rule(standard, 0), 0).geometry.count == 4);
     RDB_CHECK(result(standard, rule(standard, 0), 0).properties_before_geometry.count == 5);
+    RDB_CHECK(text(standard, standard.tagged_values[
+        result(standard, rule(standard, 0), 0).properties_before_geometry.begin].id) == "PP");
+    RDB_CHECK(text(standard, standard.tagged_values[
+        result(standard, rule(standard, 0), 0).properties_before_geometry.begin].payload) == "M1 spacing marker");
+    RDB_CHECK(standard.vertices[0].x == 10000);
+    RDB_CHECK(standard.vertices[0].y == 20000);
     RDB_CHECK(result(standard, rule(standard, 0), 1).kind == rdb::ResultKind::EdgeCluster);
     RDB_CHECK(result(standard, rule(standard, 0), 1).geometry.count == 2);
     RDB_CHECK(result(standard, rule(standard, 1), 0).properties_before_geometry.count == 2);

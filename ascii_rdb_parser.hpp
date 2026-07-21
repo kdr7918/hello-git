@@ -34,7 +34,7 @@ struct ParseOptions {
     bool allow_properties_after_geometry;
 
     ParseOptions()
-        : read_buffer_bytes(4U * 1024U * 1024U),
+        : read_buffer_bytes(16U * 1024U * 1024U),
           max_line_bytes(64U * 1024U * 1024U),
           allow_properties_after_geometry(true) {}
 };

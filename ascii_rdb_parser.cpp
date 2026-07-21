@@ -114,6 +114,54 @@ bool parse_signed(Span value, std::int64_t& result) {
     return true;
 }
 
+/*
+ * p/e 좌표는 전체 파싱에서 가장 자주 실행되는 경로다. Span을 여러 번 trim하고
+ * next_word()를 호출하는 대신 포인터를 직접 이동하며 정수 하나를 읽는다.
+ */
+bool parse_coordinate_integer(const char*& cursor, const char* end, std::int64_t& result) {
+    while (cursor != end && is_space(*cursor)) ++cursor;
+    if (cursor == end) return false;
+
+    bool negative = false;
+    if (*cursor == '+' || *cursor == '-') {
+        negative = *cursor == '-';
+        ++cursor;
+    }
+
+    const char* const first_digit = cursor;
+    const std::uint64_t positive_limit =
+        static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
+    const std::uint64_t limit = negative ? positive_limit + 1U : positive_limit;
+    std::uint64_t magnitude = 0;
+    while (cursor != end && *cursor >= '0' && *cursor <= '9') {
+        const std::uint64_t digit = static_cast<std::uint64_t>(*cursor - '0');
+        if (magnitude > (limit - digit) / 10U) return false;
+        magnitude = magnitude * 10U + digit;
+        ++cursor;
+    }
+    if (cursor == first_digit) return false;
+
+    if (negative && magnitude == positive_limit + 1U) {
+        result = std::numeric_limits<std::int64_t>::min();
+    } else {
+        result = static_cast<std::int64_t>(magnitude);
+        if (negative) result = -result;
+    }
+    return true;
+}
+
+bool only_space(const char* cursor, const char* end) {
+    while (cursor != end && is_space(*cursor)) ++cursor;
+    return cursor == end;
+}
+
+bool coordinate_candidate(Span text) {
+    text = trim(text);
+    if (text.empty()) return false;
+    const char first = *text.begin;
+    return (first >= '0' && first <= '9') || first == '+' || first == '-';
+}
+
 class BufferedLineReader {
 public:
     BufferedLineReader(const std::string& path, const ParseOptions& options)
@@ -133,6 +181,10 @@ public:
         if (fd_ < 0) {
             throw std::runtime_error("cannot open RDB file '" + path + "': " + std::strerror(errno));
         }
+#ifdef POSIX_FADV_SEQUENTIAL
+        // 전체 파서는 항상 앞에서 뒤로 한 번 읽으므로 OS readahead를 돕는다.
+        (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
     }
 
     ~BufferedLineReader() {
@@ -272,20 +324,20 @@ bool parse_rule_header(Span text, RuleHeader& result) {
 
 bool parse_point(Span text, Point& result) {
     // p 결과의 좌표 행은 정확히 x y 두 정수여야 한다.
-    Span word;
-    if (!next_word(text, word) || !parse_signed(word, result.x)) return false;
-    if (!next_word(text, word) || !parse_signed(word, result.y)) return false;
-    return trim(text).empty();
+    const char* cursor = text.begin;
+    return parse_coordinate_integer(cursor, text.end, result.x) &&
+           parse_coordinate_integer(cursor, text.end, result.y) &&
+           only_space(cursor, text.end);
 }
 
 bool parse_edge(Span text, Edge& result) {
     // e 결과의 좌표 행은 x1 y1 x2 y2 네 정수여야 한다.
-    Span word;
-    if (!next_word(text, word) || !parse_signed(word, result.first.x)) return false;
-    if (!next_word(text, word) || !parse_signed(word, result.first.y)) return false;
-    if (!next_word(text, word) || !parse_signed(word, result.second.x)) return false;
-    if (!next_word(text, word) || !parse_signed(word, result.second.y)) return false;
-    return trim(text).empty();
+    const char* cursor = text.begin;
+    return parse_coordinate_integer(cursor, text.end, result.first.x) &&
+           parse_coordinate_integer(cursor, text.end, result.first.y) &&
+           parse_coordinate_integer(cursor, text.end, result.second.x) &&
+           parse_coordinate_integer(cursor, text.end, result.second.y) &&
+           only_space(cursor, text.end);
 }
 
 StoredLine store(const LineView& line) {
@@ -312,10 +364,48 @@ std::uint32_t checked_count(std::uint64_t value, const LineView& line, const cha
     return static_cast<std::uint32_t>(value);
 }
 
+template <typename Value>
+void reserve_additional(std::vector<Value>& values,
+                        std::uint64_t additional,
+                        const LineView& line,
+                        const char* description) {
+    const std::size_t maximum = static_cast<std::size_t>(std::numeric_limits<Index>::max());
+    if (additional > maximum || values.size() > maximum - static_cast<std::size_t>(additional)) {
+        throw ParseError(line.offset, line.number, std::string(description) + " exceeds 32-bit model capacity");
+    }
+
+    const std::size_t required = values.size() + static_cast<std::size_t>(additional);
+    if (required <= values.capacity()) return;
+
+    // p/e 선언에 이미 필요한 좌표 수가 있으므로, 큰 결과 하나를 읽으며 여러 번 재할당하지 않는다.
+    std::size_t capacity = values.capacity() < 1024U ? 1024U : values.capacity();
+    while (capacity < required && capacity <= maximum / 2U) capacity *= 2U;
+    if (capacity < required) capacity = required;
+    values.reserve(capacity);
+}
+
 class PropertyIdInterner {
 public:
+    PropertyIdInterner() {
+        two_character_ids_.reserve(16);
+    }
+
     StringId intern(StringTable& strings, Span value) {
-        // 태그 ID(PP, CN 등)는 반복되므로 해시로 먼저 찾고, 충돌 시 실제 바이트를 비교한다.
+        // 일반 RDB 태그(PP, CN, EL 등)는 대부분 두 글자다.
+        // 두 바이트를 정수 key로 쓰면 FNV 해시/문자열 비교 없이 바로 찾을 수 있다.
+        if (value.size() == 2U) {
+            const std::uint16_t key = static_cast<std::uint16_t>(
+                (static_cast<std::uint16_t>(static_cast<unsigned char>(value.begin[0])) << 8U) |
+                static_cast<std::uint16_t>(static_cast<unsigned char>(value.begin[1])));
+            std::unordered_map<std::uint16_t, StringId>::iterator found = two_character_ids_.find(key);
+            if (found != two_character_ids_.end()) return found->second;
+
+            const StringId id = strings.add(value.begin, value.size());
+            two_character_ids_.insert(std::make_pair(key, id));
+            return id;
+        }
+
+        // 길이가 다른 확장 태그는 기존의 해시 + 실제 문자열 비교 경로를 사용한다.
         const std::uint64_t hash = hash_span(value);
         const std::pair<std::unordered_multimap<std::uint64_t, StringId>::iterator,
                         std::unordered_multimap<std::uint64_t, StringId>::iterator> range = ids_.equal_range(hash);
@@ -341,6 +431,7 @@ private:
         return hash;
     }
 
+    std::unordered_map<std::uint16_t, StringId> two_character_ids_;
     std::unordered_multimap<std::uint64_t, StringId> ids_;
 };
 
@@ -440,6 +531,8 @@ private:
         rule.current_result_count = checked_count(header.current_result_count, header_line, "current result count");
         rule.original_result_count = checked_count(header.original_result_count, header_line, "original result count");
 
+        // 헤더에 text/result 개수가 있으므로 전역 배열의 재할당을 미리 줄인다.
+        reserve_additional(database.check_text_lines, header.check_text_line_count, header_line, "check-text count");
         const Index text_begin = checked_index(database.check_text_lines.size(), "check-text begin");
         for (std::uint64_t i = 0; i < header.check_text_line_count; ++i) {
             LineView text_line;
@@ -449,6 +542,7 @@ private:
         rule.check_text = Range(text_begin,
                                 checked_index(database.check_text_lines.size() - text_begin, "check-text count"));
 
+        reserve_additional(database.results, rule.current_result_count, header_line, "result count");
         const Index result_begin = checked_index(database.results.size(), "result begin");
         for (std::uint32_t i = 0; i < rule.current_result_count; ++i) {
             // Result는 전역 배열에 좌표/태그를 채운 뒤, 마지막에 결과 레코드 자체를 넣는다.
@@ -490,24 +584,32 @@ private:
             ? checked_index(database.vertices.size(), "vertex begin")
             : checked_index(database.edges.size(), "edge begin");
 
+        if (signature.kind == ResultKind::Polygon) {
+            reserve_additional(database.vertices, signature.geometry_count, signature_line, "vertex count");
+        } else {
+            reserve_additional(database.edges, signature.geometry_count, signature_line, "edge count");
+        }
+
         std::uint64_t coordinates_seen = 0;
         while (coordinates_seen < signature.geometry_count) {
             // 좌표 사이에 태그가 끼어도 허용한다. 실제 좌표 수가 선언 값에 도달해야 끝난다.
             LineView line;
             if (!next_line(line)) fail_at(reader_.position(), signature_line.number, "truncated result geometry");
-            const Span text = trim(content(line));
+            const Span raw_text = content(line);
+            const Span text = trim(raw_text);
             if (text.empty()) continue;
+            const bool is_coordinate = coordinate_candidate(text);
 
             if (signature.kind == ResultKind::Polygon) {
                 Point point;
-                if (parse_point(text, point)) {
+                if (is_coordinate && parse_point(raw_text, point)) {
                     database.vertices.push_back(point);
                     ++coordinates_seen;
                     continue;
                 }
             } else {
                 Edge edge;
-                if (parse_edge(text, edge)) {
+                if (is_coordinate && parse_edge(raw_text, edge)) {
                     database.edges.push_back(edge);
                     ++coordinates_seen;
                     continue;
@@ -515,7 +617,7 @@ private:
             }
 
             ResultSignature unexpected;
-            if (parse_result_signature(text, unexpected)) {
+            if ((*text.begin == 'p' || *text.begin == 'e') && parse_result_signature(text, unexpected)) {
                 fail(line, "result ended before its declared coordinate count");
             }
             append_property(database, text);
