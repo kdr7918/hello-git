@@ -73,10 +73,44 @@ Malformed input and model-capacity overflows throw `rdb::ParseError`
 or `std::length_error`.  `ParseError` contains the source byte offset and line
 number, which can be reported directly in a UI.
 
+## Incremental UI parsers
+
+Three additional header-only components support an on-demand UI workflow.
+They use memory mapping and avoid retaining data outside each component's
+declared output.
+
+```cpp
+#include "rdb_check_index.hpp"
+#include "rdb_check_detail.hpp"
+#include "rdb_check_geometry.hpp"
+
+rdb::FastCheckIndexParser index_parser;
+std::vector<rdb::CheckIndexEntry> checks = index_parser.parse_file("result.rdb");
+
+rdb::CheckDetailParser detail_parser;
+rdb::CheckDetail selected = detail_parser.parse_file_at("result.rdb", checks[0].offset);
+
+rdb::CheckGeometryParser geometry_parser;
+rdb::GeometryDatabase geometry = geometry_parser.parse_file("result.rdb");
+```
+
+- `FastCheckIndexParser` retains only check name, byte offset, and the current
+  `p/e` result count.  This is the fast TreeView stage.
+- `CheckDetailParser` seeks to one indexed offset and parses that check's
+  check text, tags, and geometry without loading the earlier checks.
+- `CheckGeometryParser` scans the complete file once and retains check name,
+  offset, result count, `p/e` metadata, and coordinates only.
+
+`geometry_count` in `CheckIndexEntry` and `GeometryCheck` means the count of
+`p/e` result records (defect shapes), not the total vertex or edge count.
+
 ## Repository layout
 
 - `ascii_rdb.hpp` — compact public data model
 - `ascii_rdb_parser.hpp/.cpp` — full one-pass parser
+- `rdb_check_index.hpp` — fast name/offset/result-count indexer
+- `rdb_check_detail.hpp` — offset-based single-check detail parser
+- `rdb_check_geometry.hpp` — complete coordinate-only parser
 - `rdb_parser_tests.cpp` — executable test suite
 - `*_sample.rdb` — small and large synthetic fixtures
 

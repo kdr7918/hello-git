@@ -1,4 +1,7 @@
 #include "ascii_rdb_parser.hpp"
+#include "rdb_check_detail.hpp"
+#include "rdb_check_geometry.hpp"
+#include "rdb_check_index.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -73,6 +76,49 @@ int main() {
     RDB_CHECK(large_post_geometry.results.size() == 200);
     RDB_CHECK(large_post_geometry.vertices.size() == 400);
     RDB_CHECK(large_post_geometry.edges.size() == 200);
+
+    const rdb::FastCheckIndexParser index_parser;
+    const std::vector<rdb::CheckIndexEntry> index =
+        index_parser.parse_file(sample_path("standard_sample.rdb"));
+    RDB_CHECK(index.size() == 3);
+    RDB_CHECK(index[0].name == "M1.SPACING.1");
+    RDB_CHECK(index[0].offset > 0);
+    RDB_CHECK(index[0].geometry_count == 2);
+    RDB_CHECK(index[1].geometry_count == 1);
+    RDB_CHECK(index[2].geometry_count == 0);
+    RDB_CHECK(index_parser.parse_file(sample_path("large_standard_sample.rdb")).size() == 100);
+    RDB_CHECK(index_parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb")).size() == 100);
+
+    const rdb::CheckDetailParser detail_parser;
+    const rdb::CheckDetail first_check =
+        detail_parser.parse_file_at(sample_path("standard_sample.rdb"), index[0].offset);
+    RDB_CHECK(first_check.name == "M1.SPACING.1");
+    RDB_CHECK(first_check.results.size() == 2);
+    RDB_CHECK(first_check.results[0].vertices.size() == 4);
+    RDB_CHECK(first_check.results[0].properties_before_geometry.size() == 5);
+    RDB_CHECK(first_check.results[1].edges.size() == 2);
+
+    const rdb::CheckDetail extended_check = detail_parser.parse_file_at(
+        sample_path("post_coordinate_tags_sample.rdb"),
+        index_parser.parse_file(sample_path("post_coordinate_tags_sample.rdb"))[0].offset);
+    RDB_CHECK(extended_check.results[0].properties_after_geometry.size() == 2);
+    RDB_CHECK(extended_check.results[1].properties_after_geometry.size() == 3);
+
+    const rdb::CheckGeometryParser geometry_parser;
+    const rdb::GeometryDatabase geometry = geometry_parser.parse_file(sample_path("standard_sample.rdb"));
+    RDB_CHECK(geometry.checks.size() == 3);
+    RDB_CHECK(geometry.results.size() == 3);
+    RDB_CHECK(geometry.vertices.size() == 8);
+    RDB_CHECK(geometry.edges.size() == 2);
+    RDB_CHECK(geometry.checks[0].results.count == 2);
+    RDB_CHECK(geometry.checks[1].results.count == 1);
+
+    const rdb::GeometryDatabase large_geometry =
+        geometry_parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb"));
+    RDB_CHECK(large_geometry.checks.size() == 100);
+    RDB_CHECK(large_geometry.results.size() == 200);
+    RDB_CHECK(large_geometry.vertices.size() == 400);
+    RDB_CHECK(large_geometry.edges.size() == 200);
 
     std::cout << "rdb-parser-tests: OK\n";
 }
