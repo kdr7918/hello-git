@@ -247,6 +247,35 @@ void test_trim_and_zero_allocation_split_callback() {
     CHECK(joined == "one,two,three");
 }
 
+void test_string_view_whitespace_split_trims_ends_and_collapses_runs() {
+    const std::string storage = " \t alpha  beta\r\n gamma \v ";
+    const StringView input(storage.data(), storage.size(), 100u);
+    const std::vector<StringView> parts = input.split_whitespace();
+    CHECK(parts.size() == 3u);
+    check_eq(parts[0], "alpha");
+    check_eq(parts[1], "beta");
+    check_eq(parts[2], "gamma");
+    CHECK(parts[0].offset == 103u);
+    CHECK(parts[1].offset == 110u);
+    CHECK(parts[2].offset == 117u);
+
+    std::size_t count = 0;
+    std::string joined;
+    fasttext::split_whitespace_each(input, [&](StringView part) {
+        if (!joined.empty()) joined += '|';
+        joined += part.to_string();
+        ++count;
+    });
+    CHECK(count == 3u);
+    CHECK(joined == "alpha|beta|gamma");
+    CHECK(StringView("  \t\r\n ").split_whitespace().empty());
+    CHECK(StringView("").split_whitespace().empty());
+    const std::vector<StringView> form_feed = StringView("left\f\fright").split_whitespace();
+    CHECK(form_feed.size() == 2u);
+    check_eq(form_feed[0], "left");
+    check_eq(form_feed[1], "right");
+}
+
 void test_read_buffer_file_and_offset_roundtrip() {
 #if defined(__unix__) || defined(__APPLE__)
     char path[] = "/tmp/fast_text_parser_test_XXXXXX";
@@ -298,6 +327,7 @@ int main() {
     test_string_view_classification_and_numeric_values();
     test_split_find_word_and_regex();
     test_trim_and_zero_allocation_split_callback();
+    test_string_view_whitespace_split_trims_ends_and_collapses_runs();
     test_read_buffer_file_and_offset_roundtrip();
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

@@ -16,6 +16,7 @@ C++11만 사용한 **고속 줄 단위 텍스트 파서**입니다. 일반 파�
 ```text
 include/fast_text_parser.hpp   header-only 라이브러리
 examples/parse_file.cpp        이전/다음 줄과 offset 사용 예제
+examples/cursor_match_example.cpp  Cursor/Match/공백 split 예제
 tests/test_fast_text_parser.cpp
 benchmark/benchmark.cpp        mmap/ReadBuffer/std::getline 비교
 ```
@@ -200,7 +201,36 @@ std::vector<fasttext::StringView> fields = fasttext::split(line, ',');
 fasttext::split_each(line, ',', [](fasttext::StringView field) {
     field = fasttext::trim(field);
 });
+
+// 좌우 끝 공백 제거 + 연속 공백을 하나의 구분자로 처리
+std::vector<fasttext::StringView> words = line.split_whitespace();
+
+// allocation 없는 공백 split hot path
+fasttext::split_whitespace_each(line, [](fasttext::StringView word) {
+    // 빈 token은 전달되지 않음
+});
 ```
+
+`split_whitespace()`는 space, tab, CR, LF, form-feed, vertical-tab을 공백으로 처리합니다. 좌우 끝 공백은 `trim()`한 것처럼 제거하고, 중간의 연속 공백은 하나의 구분자로 취급합니다. 반환되는 token은 원본을 참조하는 zero-copy `StringView`이며 절대 offset을 보존합니다.
+
+## Cursor와 Match 실행 예제
+
+전체 예제는 [`examples/cursor_match_example.cpp`](examples/cursor_match_example.cpp)에 있습니다.
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+cmake --build build -j
+./build/fast_text_parser_cursor_match_example
+```
+
+예제에서 확인할 수 있는 내용:
+
+- `StringView::split_whitespace()`와 token 절대 offset
+- `Cursor::read_int64()`, `read_identifier()`, `read_word()`
+- `Cursor::absolute_offset()`
+- 미리 컴파일한 `std::regex`
+- `regex_find()`와 `Match.offset`, `Match.length`
+- 절대 Match offset을 다시 원래 `StringView::substr()`로 변환하는 방법
 
 정규식은 미리 컴파일한 `std::regex`를 전달합니다.
 

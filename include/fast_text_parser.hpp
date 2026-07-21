@@ -83,6 +83,7 @@ public:
     std::int64_t int64_value(std::int64_t fallback = 0) const;
     std::uint64_t uint64_value(std::uint64_t fallback = 0) const;
     double number_value(double fallback = 0.0) const;
+    std::vector<StringView> split_whitespace() const;
 };
 
 inline bool operator==(const StringView& left, const StringView& right) {
@@ -177,6 +178,27 @@ inline std::vector<StringView> split(StringView value, char delimiter) {
     std::vector<StringView> result;
     result.reserve(8);
     split_each(value, delimiter, [&](StringView part) { result.push_back(part); });
+    return result;
+}
+
+template <typename Callback>
+inline void split_whitespace_each(StringView value, Callback callback) {
+    value = trim(value);
+    std::size_t position = 0;
+    while (position < value.size) {
+        const std::size_t start = position;
+        while (position < value.size && !is_space(value[position])) ++position;
+        callback(value.substr(start, position - start));
+        while (position < value.size && is_space(value[position])) ++position;
+    }
+}
+
+inline std::vector<StringView> StringView::split_whitespace() const {
+    std::vector<StringView> result;
+    const StringView value = trim(*this);
+    if (value.empty()) return result;
+    result.reserve(8);
+    split_whitespace_each(value, [&](StringView part) { result.push_back(part); });
     return result;
 }
 

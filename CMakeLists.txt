@@ -1,6 +1,10 @@
 cmake_minimum_required(VERSION 3.10)
 project(cpp11_fast_text_parser LANGUAGES CXX)
 
+set(CMAKE_CXX_STANDARD 11)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
 option(FASTTEXT_BUILD_TESTS "Build tests" ON)
 option(FASTTEXT_BUILD_BENCHMARK "Build benchmark" ON)
 
@@ -11,6 +15,9 @@ target_compile_features(fast_text_parser INTERFACE cxx_std_11)
 
 add_executable(fast_text_parser_example examples/parse_file.cpp)
 target_link_libraries(fast_text_parser_example PRIVATE fast_text_parser)
+
+add_executable(fast_text_parser_cursor_match_example examples/cursor_match_example.cpp)
+target_link_libraries(fast_text_parser_cursor_match_example PRIVATE fast_text_parser)
 
 if(FASTTEXT_BUILD_TESTS)
     enable_testing()
