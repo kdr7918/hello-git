@@ -10,6 +10,7 @@
 namespace rdb {
 
 struct GeometryResult {
+    // p/e 레코드 하나와 전역 vertices/edges 배열 안의 좌표 구간이다.
     ResultKind kind;
     std::uint32_t ordinal;
     Range geometry;
@@ -18,6 +19,7 @@ struct GeometryResult {
 };
 
 struct GeometryCheck {
+    // CheckIndexEntry와 비슷하지만, 이 구조체는 GeometryDatabase 내부 결과 구간도 가진다.
     std::string name;
     CheckOffset offset;
     std::uint32_t geometry_count;
@@ -26,7 +28,8 @@ struct GeometryCheck {
     GeometryCheck() : offset(0), geometry_count(0) {}
 };
 
-/* File-wide data for workflows that need names, offsets, result counts, and coordinates only. */
+// 이름, offset, 결과 수, 좌표만 필요한 전체 파일용 데이터다.
+// check text와 태그를 저장하지 않아 Full Database보다 메모리를 덜 사용한다.
 struct GeometryDatabase {
     std::vector<GeometryCheck> checks;
     std::vector<GeometryResult> results;
@@ -37,6 +40,7 @@ struct GeometryDatabase {
 namespace detail {
 
 inline Index checked_geometry_index(std::size_t value, CheckOffset offset, const char* description) {
+    // Range는 32비트 index를 쓰므로, 벡터가 표현 범위를 넘기기 전에 명확히 실패시킨다.
     if (value > static_cast<std::size_t>(std::numeric_limits<Index>::max())) {
         throw ScanError(offset, std::string(description) + " exceeds 32-bit range capacity");
     }
@@ -46,6 +50,7 @@ inline Index checked_geometry_index(std::size_t value, CheckOffset offset, const
 inline void consume_geometry(LineCursor& cursor,
                              const ResultSignature& signature,
                              GeometryDatabase& database) {
+    // 상세 파서와 달리 태그 문자열은 만들지 않고 좌표만 전역 배열에 추가한다.
     std::uint64_t seen = 0;
     while (seen < signature.coordinate_count) {
         Line line;
@@ -73,16 +78,17 @@ inline void consume_geometry(LineCursor& cursor,
         if (parse_result_signature(text, unexpected)) {
             throw ScanError(line.offset, "result ended before its declared coordinate count");
         }
-        /* Non-coordinate lines are tagged values and deliberately ignored. */
+        // 좌표가 아닌 행은 태그다. 이 모드에서는 의도적으로 버린다.
     }
 }
 
 } // namespace detail
 
 /*
- * One-pass coordinate-only loader.  Rule text and tagged values are skipped;
- * only rule identity, file offset, result count, p/e metadata, and geometry
- * are retained.
+ * 3단계용 전체 좌표 파서다.
+ *
+ * 파일을 한 번 끝까지 읽되 RuleCheck text와 태그는 건너뛴다. 이름, offset,
+ * p/e 메타데이터, 좌표만 남기므로 좌표 테이블/미니맵용 백그라운드 로딩에 맞는다.
  */
 class CheckGeometryParser {
 public:
@@ -104,6 +110,7 @@ public:
             check.geometry_count = header.current_result_count;
 
             detail::skip_check_text(cursor, header);
+            // Check가 차지할 GeometryResult 시작 위치를 기억해 Range로 연결한다.
             const Index result_begin = detail::checked_geometry_index(
                 database.results.size(), check.offset, "result begin");
 
@@ -122,6 +129,7 @@ public:
                     : detail::checked_geometry_index(database.edges.size(), signature_line.offset, "edge begin");
 
                 detail::consume_geometry(cursor, signature, database);
+                // p면 vertices, e면 edges 배열에서 이번 결과가 추가한 구간만 기록한다.
                 const std::size_t geometry_size = signature.kind == ResultKind::Polygon
                     ? database.vertices.size() - geometry_begin
                     : database.edges.size() - geometry_begin;
