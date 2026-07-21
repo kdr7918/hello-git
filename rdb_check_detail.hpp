@@ -4,6 +4,7 @@
 #include "rdb_check_index.hpp"
 
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace rdb {
@@ -117,16 +118,17 @@ inline void consume_detail_intermediate_tail(LineCursor& cursor, DetailResult& r
 inline void consume_detail_final_tail(LineCursor& cursor, DetailResult& result) {
     // 마지막 결과 뒤에서는 다음 "규칙 이름 + 헤더" 조합을 만나면 멈춘다.
     // 이 처리가 있어야 다음 RuleCheck의 내용을 현재 결과의 태그로 잘못 넣지 않는다.
+    bool have_candidate = false;
+    Line candidate;
     for (;;) {
-        Line candidate;
-        if (!next_nonblank(cursor, candidate)) return;
+        if (!have_candidate && !next_nonblank(cursor, candidate)) return;
+        have_candidate = false;
 
         ResultSignature extra;
         if (parse_result_signature(trim(candidate.text), extra)) {
             throw ScanError(candidate.offset, "physical result list exceeds result count in rule header");
         }
 
-        const char* const after_candidate = cursor.mark();
         Line possible_header;
         if (!next_nonblank(cursor, possible_header)) {
             result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
@@ -139,11 +141,108 @@ inline void consume_detail_final_tail(LineCursor& cursor, DetailResult& result) 
         }
 
         result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
-        cursor.reset(after_candidate);
+        // possible_header는 이미 읽었지만 다음 후보로 재사용한다.
+        // mmap의 Line 포인터는 파싱 중 유효하므로 파일을 다시 읽을 필요가 없다.
+        candidate = possible_header;
+        have_candidate = true;
     }
 }
 
+// 실제 상세 파싱 본문이다. MappedFile을 인자로 받아, 일회성 파서와 재사용 세션이 같은
+// 구현을 공유하게 한다.
+inline CheckDetail parse_check_detail(const MappedFile& file, CheckOffset offset) {
+    LineCursor cursor(file, offset);
+
+    Line name_line;
+    if (!next_nonblank(cursor, name_line)) throw ScanError(offset, "missing rule-check name");
+    Line header_line;
+    if (!cursor.next(header_line)) throw ScanError(cursor.position(), "truncated rule-check header");
+
+    RuleHeader header;
+    const Span header_text = trim(header_line.text);
+    if (!parse_rule_header(header_text, header)) {
+        throw ScanError(header_line.offset, "expected rule-check header");
+    }
+
+    CheckDetail check;
+    check.name = as_string(trim(name_line.text));
+    check.offset = name_line.offset;
+    check.current_result_count = header.current_result_count;
+    check.original_result_count = header.original_result_count;
+
+    // 헤더의 날짜/시간은 앞의 숫자 세 개를 소비한 나머지 전체다.
+    Span words = header_text;
+    Span word;
+    for (int i = 0; i < 3; ++i) (void)next_word(words, word);
+    check.executed_at = as_string(trim(words));
+
+    check.check_text.reserve(static_cast<std::size_t>(header.check_text_line_count));
+    check.results.reserve(header.current_result_count);
+    for (std::uint64_t i = 0; i < header.check_text_line_count; ++i) {
+        Line line;
+        if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated check text");
+        check.check_text.push_back(as_string(line.text));
+    }
+
+    for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
+        DetailResult result;
+        Line signature_line;
+        ResultSignature signature;
+        bool found = false;
+        while (next_nonblank(cursor, signature_line)) {
+            // p/e 선언 전의 줄은 표준 위치의 태그로 간주한다.
+            if (parse_result_signature(trim(signature_line.text), signature)) {
+                found = true;
+                break;
+            }
+            result.properties_before_geometry.push_back(
+                parse_detail_tag(trim(signature_line.text)));
+        }
+        if (!found) throw ScanError(cursor.position(), "truncated result list");
+
+        result.kind = signature.kind;
+        result.ordinal = signature.ordinal;
+        result.signature_suffix = as_string(signature.suffix);
+        if (signature.kind == ResultKind::Polygon) {
+            // vector 용량을 미리 확보하면 좌표를 읽으며 재할당하는 일을 줄일 수 있다.
+            result.vertices.reserve(static_cast<std::size_t>(signature.coordinate_count));
+        } else {
+            result.edges.reserve(static_cast<std::size_t>(signature.coordinate_count));
+        }
+        consume_detail_geometry(cursor, signature, result);
+
+        if (i + 1U == header.current_result_count) {
+            consume_detail_final_tail(cursor, result);
+        } else {
+            consume_detail_intermediate_tail(cursor, result);
+        }
+        // DetailResult 안의 큰 vector들을 복사하지 않고 CheckDetail로 소유권을 옮긴다.
+        check.results.push_back(std::move(result));
+    }
+
+    return check;
+}
+
 } // namespace detail
+
+/*
+ * UI가 같은 RDB에서 여러 Check를 선택할 때 사용하는 재사용 세션이다.
+ * 생성 시 파일을 한 번만 mmap하고, parse_at()은 각 offset의 Check 본문만 읽는다.
+ */
+class CheckDetailFile {
+public:
+    explicit CheckDetailFile(const std::string& path) : file_(path) {}
+
+    CheckDetail parse_at(CheckOffset offset) const {
+        return detail::parse_check_detail(file_, offset);
+    }
+
+private:
+    CheckDetailFile(const CheckDetailFile&);
+    CheckDetailFile& operator=(const CheckDetailFile&);
+
+    detail::MappedFile file_;
+};
 
 /*
  * 2단계용 선택 Check 상세 파서다.
@@ -155,75 +254,7 @@ class CheckDetailParser {
 public:
     CheckDetail parse_file_at(const std::string& path, CheckOffset offset) const {
         detail::MappedFile file(path);
-        detail::LineCursor cursor(file, offset);
-
-        detail::Line name_line;
-        if (!detail::next_nonblank(cursor, name_line)) throw ScanError(offset, "missing rule-check name");
-        detail::Line header_line;
-        if (!cursor.next(header_line)) throw ScanError(cursor.position(), "truncated rule-check header");
-
-        detail::RuleHeader header;
-        const detail::Span header_text = detail::trim(header_line.text);
-        if (!detail::parse_rule_header(header_text, header)) {
-            throw ScanError(header_line.offset, "expected rule-check header");
-        }
-
-        CheckDetail check;
-        // 헤더의 날짜/시간은 앞의 숫자 세 개를 소비한 나머지 전체다.
-        check.name = detail::as_string(detail::trim(name_line.text));
-        check.offset = name_line.offset;
-        check.current_result_count = header.current_result_count;
-        check.original_result_count = header.original_result_count;
-
-        detail::Span words = header_text;
-        detail::Span word;
-        for (int i = 0; i < 3; ++i) (void)detail::next_word(words, word);
-        check.executed_at = detail::as_string(detail::trim(words));
-
-        check.check_text.reserve(static_cast<std::size_t>(header.check_text_line_count));
-        check.results.reserve(header.current_result_count);
-        for (std::uint64_t i = 0; i < header.check_text_line_count; ++i) {
-            detail::Line line;
-            if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated check text");
-            check.check_text.push_back(detail::as_string(line.text));
-        }
-
-        for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
-            DetailResult result;
-            detail::Line signature_line;
-            detail::ResultSignature signature;
-            bool found = false;
-            while (detail::next_nonblank(cursor, signature_line)) {
-                // p/e 선언 전의 줄은 표준 위치의 태그로 간주한다.
-                if (detail::parse_result_signature(detail::trim(signature_line.text), signature)) {
-                    found = true;
-                    break;
-                }
-                result.properties_before_geometry.push_back(
-                    detail::parse_detail_tag(detail::trim(signature_line.text)));
-            }
-            if (!found) throw ScanError(cursor.position(), "truncated result list");
-
-            result.kind = signature.kind;
-            result.ordinal = signature.ordinal;
-            result.signature_suffix = detail::as_string(signature.suffix);
-            if (signature.kind == ResultKind::Polygon) {
-                // vector 용량을 미리 확보하면 좌표를 읽으며 재할당하는 일을 줄일 수 있다.
-                result.vertices.reserve(static_cast<std::size_t>(signature.coordinate_count));
-            } else {
-                result.edges.reserve(static_cast<std::size_t>(signature.coordinate_count));
-            }
-            detail::consume_detail_geometry(cursor, signature, result);
-
-            if (i + 1U == header.current_result_count) {
-                detail::consume_detail_final_tail(cursor, result);
-            } else {
-                detail::consume_detail_intermediate_tail(cursor, result);
-            }
-            check.results.push_back(result);
-        }
-
-        return check;
+        return detail::parse_check_detail(file, offset);
     }
 };
 

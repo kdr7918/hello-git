@@ -76,8 +76,7 @@ number, which can be reported directly in a UI.
 ## Incremental UI parsers
 
 Three additional header-only components support an on-demand UI workflow.
-They use memory mapping and avoid retaining data outside each component's
-declared output.
+They avoid retaining data outside each component's declared output.
 
 ```cpp
 #include "rdb_check_index.hpp"
@@ -87,22 +86,29 @@ declared output.
 rdb::FastCheckIndexParser index_parser;
 std::vector<rdb::CheckIndexEntry> checks = index_parser.parse_file("result.rdb");
 
-rdb::CheckDetailParser detail_parser;
-rdb::CheckDetail selected = detail_parser.parse_file_at("result.rdb", checks[0].offset);
+// 같은 RDB에서 여러 Check를 선택한다면 파일 매핑을 한 번 재사용한다.
+rdb::CheckDetailFile detail_file("result.rdb");
+rdb::CheckDetail selected = detail_file.parse_at(checks[0].offset);
 
 rdb::CheckGeometryParser geometry_parser;
 rdb::GeometryDatabase geometry = geometry_parser.parse_file("result.rdb");
 ```
 
-- `FastCheckIndexParser` retains only check name, byte offset, and the current
-  `p/e` result count.  This is the fast TreeView stage.
+- `FastCheckIndexParser` uses a sequential `read()` buffer and `memchr(':')`
+  to find `HH:MM:SS` rule headers.  It retains only the check name, byte
+  offset, and current `p/e` result count.  This is the fastest TreeView stage.
 - `CheckDetailParser` seeks to one indexed offset and parses that check's
   check text, tags, and geometry without loading the earlier checks.
+  `CheckDetailFile` is the preferred reusable session for repeated selection.
 - `CheckGeometryParser` scans the complete file once and retains check name,
   offset, result count, `p/e` metadata, and coordinates only.
 
 `geometry_count` in `CheckIndexEntry` and `GeometryCheck` means the count of
 `p/e` result records (defect shapes), not the total vertex or edge count.
+
+`FastCheckIndexParser` is a trusted-format fast path: each rule header must
+contain three leading decimal counts and an `HH:MM:SS` timestamp.  Use the
+coordinate parser when a nonstandard file must be structurally interpreted.
 
 ## Repository layout
 

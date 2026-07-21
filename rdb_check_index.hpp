@@ -46,6 +46,20 @@ struct CheckIndexEntry {
     CheckIndexEntry() : offset(0), geometry_count(0) {}
 };
 
+/*
+ * 1단계 인덱서 전용 설정이다.
+ * read_buffer_bytes는 시스템 호출 횟수와 캐시 사용량의 균형을 위한 값이다.
+ * context_bytes는 버퍼 경계에서 바로 앞 Check Name 줄까지 다시 볼 수 있게 남겨 둔다.
+ */
+struct FastCheckIndexOptions {
+    std::size_t read_buffer_bytes;
+    std::size_t context_bytes;
+
+    FastCheckIndexOptions()
+        : read_buffer_bytes(16U * 1024U * 1024U),
+          context_bytes(64U * 1024U) {}
+};
+
 namespace detail {
 
 // 파일 버퍼를 복사하지 않고 [begin, end) 포인터 두 개로 표현한 문자열 조각이다.
@@ -355,6 +369,185 @@ inline void skip_fast_coordinates(LineCursor& cursor, const ResultSignature& sig
     }
 }
 
+inline bool decimal(char value) {
+    return value >= '0' && value <= '9';
+}
+
+inline bool parse_decimal_token(const char*& cursor, const char* end, std::uint64_t& value) {
+    while (cursor != end && space(*cursor)) ++cursor;
+    const char* const first = cursor;
+    std::uint64_t parsed = 0;
+    while (cursor != end && decimal(*cursor)) {
+        const std::uint64_t digit = static_cast<std::uint64_t>(*cursor - '0');
+        if (parsed > (std::numeric_limits<std::uint64_t>::max() - digit) / 10U) return false;
+        parsed = parsed * 10U + digit;
+        ++cursor;
+    }
+    if (cursor == first) return false;
+    value = parsed;
+    return true;
+}
+
+inline bool timestamp_colon(const char* begin, const char* colon, const char* end) {
+    // 첫 번째 ':'만 통과한다. 두 번째 ':'에서는 colon[-2]가 ':'이므로 자동으로 탈락한다.
+    if (colon - begin < 2 || end - colon < 6) return false;
+    if (!decimal(colon[-2]) || !decimal(colon[-1]) ||
+        !decimal(colon[1]) || !decimal(colon[2]) || colon[3] != ':' ||
+        !decimal(colon[4]) || !decimal(colon[5])) {
+        return false;
+    }
+    // 시간 뒤에 숫자/문자가 이어지면 HH:MM:SS의 일부가 아닐 가능성이 높다.
+    if (end - colon > 6 && !space(colon[6]) && colon[6] != '\n') return false;
+
+    const int hour = (colon[-2] - '0') * 10 + (colon[-1] - '0');
+    const int minute = (colon[1] - '0') * 10 + (colon[2] - '0');
+    const int second = (colon[4] - '0') * 10 + (colon[5] - '0');
+    return hour < 24 && minute < 60 && second < 60;
+}
+
+inline bool make_check_index_entry(const char* buffer_begin,
+                                   const char* buffer_end,
+                                   const char* time_colon,
+                                   FileOffset buffer_offset,
+                                   CheckIndexEntry& entry) {
+    // 시간 줄의 시작을 찾는다. 이 줄은 "현재 수 원래 수 text 줄 수 날짜 시간" 헤더여야 한다.
+    const char* header_begin = time_colon;
+    while (header_begin != buffer_begin && header_begin[-1] != '\n') --header_begin;
+    if (header_begin == buffer_begin) return false; // 직전 Check Name 줄이 현재 버퍼에 없다.
+
+    // 헤더 바로 앞 줄이 Check Name이다. 버퍼 경계에서 잘린 이름은 오인식을 피하려고 건너뛴다.
+    const char* name_end = header_begin - 1;
+    if (name_end != buffer_begin && name_end[-1] == '\r') --name_end;
+    const char* name_begin = name_end;
+    while (name_begin != buffer_begin && name_begin[-1] != '\n') --name_begin;
+    if (name_begin == buffer_begin && buffer_offset != 0) return false;
+    const Span name = trim(Span(name_begin, name_end));
+    if (name.empty()) return false;
+
+    // 시간 전까지의 처음 세 숫자만 읽는다. 이 검사가 ':'가 들어 있는 일반 comment를 걸러 낸다.
+    const char* cursor = header_begin;
+    std::uint64_t current = 0;
+    std::uint64_t original = 0;
+    std::uint64_t text_lines = 0;
+    if (!parse_decimal_token(cursor, buffer_end, current) ||
+        !parse_decimal_token(cursor, buffer_end, original) ||
+        !parse_decimal_token(cursor, buffer_end, text_lines) ||
+        cursor > time_colon || current > std::numeric_limits<std::uint32_t>::max()) {
+        return false;
+    }
+
+    entry.name.assign(name.begin, name.size());
+    entry.offset = buffer_offset + static_cast<FileOffset>(name_begin - buffer_begin);
+    entry.geometry_count = static_cast<std::uint32_t>(current);
+    return true;
+}
+
+/*
+ * 최속 1단계 경로다. 전체 문법을 따라가지 않고 시간의 첫 ':'만 검색한다.
+ * read() 버퍼 끝에는 context_bytes를 남겨, 다음 버퍼에서 앞선 Check Name 줄을 찾을 수 있게 한다.
+ */
+class HeaderPatternIndexReader {
+public:
+    HeaderPatternIndexReader(const std::string& path, const FastCheckIndexOptions& options)
+        : fd_(-1),
+          context_bytes_(options.context_bytes),
+          buffer_offset_(0) {
+        if (options.read_buffer_bytes == 0 || options.context_bytes < 64U) {
+            throw std::invalid_argument("fast RDB index buffer/context size is too small");
+        }
+        if (options.read_buffer_bytes > std::numeric_limits<std::size_t>::max() - options.context_bytes) {
+            throw std::length_error("fast RDB index buffer size overflows size_t");
+        }
+        buffer_.resize(options.read_buffer_bytes + options.context_bytes);
+
+        fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
+        if (fd_ < 0) {
+            throw std::runtime_error("cannot open RDB file '" + path + "': " + std::strerror(errno));
+        }
+#ifdef POSIX_FADV_SEQUENTIAL
+        // 인덱스는 첫 바이트부터 한 번만 읽으므로 커널 readahead에 순차 접근을 알려 준다.
+        (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+    }
+
+    ~HeaderPatternIndexReader() {
+        if (fd_ >= 0) ::close(fd_);
+    }
+
+    std::vector<CheckIndexEntry> run() {
+        std::vector<CheckIndexEntry> checks;
+        std::size_t carried = 0;
+        std::size_t scan_begin = 0;
+        const std::size_t lookahead_bytes = 7U; // HH:MM:SS 뒤 문자까지 확인할 수 있는 최소 여유
+
+        for (;;) {
+            const ssize_t received = read_block(&buffer_[carried], buffer_.size() - carried);
+            const bool eof = received == 0;
+            const std::size_t total = carried + (received > 0 ? static_cast<std::size_t>(received) : 0U);
+
+            // ':' 뒤에 HH:MM:SS가 모두 들어 있는 후보만 처리한다.
+            // 버퍼 끝 7바이트는 다음 read 후 검사한다.
+            const std::size_t scan_end = eof ? total :
+                (total > lookahead_bytes ? total - lookahead_bytes : 0U);
+            if (scan_begin < scan_end) scan_headers(total, scan_begin, scan_end, checks);
+
+            if (eof) break;
+
+            // 다음 버퍼의 첫 부분에 이전 데이터 context_bytes를 겹쳐 남긴다.
+            // 아직 검사하지 않은 마지막 7바이트 앞에도 Check Name/헤더가 남아 있어야 한다.
+            carried = total < context_bytes_ ? total : context_bytes_;
+            const std::size_t consumed = total - carried;
+            if (carried != 0) {
+                std::memmove(&buffer_[0], &buffer_[consumed], carried);
+            }
+            buffer_offset_ += static_cast<FileOffset>(consumed);
+            scan_begin = carried > lookahead_bytes ? carried - lookahead_bytes : 0U;
+        }
+        return checks;
+    }
+
+private:
+    ssize_t read_block(char* destination, std::size_t capacity) {
+        for (;;) {
+            const ssize_t received = ::read(fd_, destination, capacity);
+            if (received >= 0) return received;
+            if (errno != EINTR) {
+                throw std::runtime_error("cannot read RDB file: " + std::string(std::strerror(errno)));
+            }
+        }
+    }
+
+    void scan_headers(std::size_t total_size,
+                      std::size_t scan_begin,
+                      std::size_t scan_end_size,
+                      std::vector<CheckIndexEntry>& checks) const {
+        const char* const begin = &buffer_[0];
+        const char* const end = begin + total_size;
+        const char* cursor = begin + scan_begin;
+        const char* const scan_end = begin + scan_end_size;
+        while (cursor != scan_end) {
+            const void* const found = std::memchr(cursor, ':', static_cast<std::size_t>(scan_end - cursor));
+            if (found == 0) return;
+            const char* const colon = static_cast<const char*>(found);
+            if (timestamp_colon(begin, colon, end)) {
+                CheckIndexEntry entry;
+                if (make_check_index_entry(begin, end, colon, buffer_offset_, entry)) {
+                    checks.push_back(entry);
+                }
+            }
+            cursor = colon + 1;
+        }
+    }
+
+    HeaderPatternIndexReader(const HeaderPatternIndexReader&);
+    HeaderPatternIndexReader& operator=(const HeaderPatternIndexReader&);
+
+    int fd_;
+    std::vector<char> buffer_;
+    std::size_t context_bytes_;
+    FileOffset buffer_offset_;
+};
+
 // 본문을 저장하지 않고 "규칙 이름 줄 + 규칙 헤더 줄" 조합을 찾는다.
 // 후보 다음 줄이 헤더가 아니면 한 줄만 전진해 다시 검사한다.
 inline bool next_rule(LineCursor& cursor, Line& name_line, RuleHeader& header) {
@@ -375,44 +568,18 @@ inline bool next_rule(LineCursor& cursor, Line& name_line, RuleHeader& header) {
 } // namespace detail
 
 /*
- * 1단계용 빠른 스캐너다.
+ * 1단계용 최고속 스캐너다.
  *
- * 파일을 mmap으로 연결하고 규칙 이름, 파일 offset, 현재 p/e 결과 수만 결과 벡터에 넣는다.
- * 좌표와 태그는 저장하지 않고 건너뛰므로 TreeView를 먼저 빨리 만들 때 사용한다.
+ * read() 버퍼에서 HH:MM:SS의 첫 ':'만 찾고, 그 줄의 처음 세 숫자를 검증한다.
+ * 따라서 좌표, 태그, check text, p/e 선언을 전혀 해석하지 않는다.
+ * 이 경로는 표준적인 "숫자 3개 + 날짜 + HH:MM:SS" RuleCheck 헤더를 전제한다.
  */
 class FastCheckIndexParser {
 public:
-    std::vector<CheckIndexEntry> parse_file(const std::string& path) const {
-        detail::MappedFile file(path);
-        detail::LineCursor cursor(file);
-        detail::Line top_header;
-        if (!detail::next_nonblank(cursor, top_header)) throw ScanError(0, "empty RDB file");
-        detail::validate_database_header(top_header);
-
-        std::vector<CheckIndexEntry> checks;
-        detail::Line name_line;
-        detail::RuleHeader header;
-        while (detail::next_rule(cursor, name_line, header)) {
-            // 이 세 필드가 1단계 파서의 최종 산출물이다.
-            CheckIndexEntry entry;
-            const detail::Span name = detail::trim(name_line.text);
-            entry.name.assign(name.begin, name.size());
-            entry.offset = name_line.offset;
-            entry.geometry_count = header.current_result_count;
-            checks.push_back(entry);
-
-            detail::skip_check_text(cursor, header);
-            for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
-                // p/e 선언과 선언된 수만큼의 좌표 행만 지나간다.
-                detail::Line signature_line;
-                detail::ResultSignature signature;
-                if (!detail::next_result_signature(cursor, signature_line, signature)) {
-                    throw ScanError(cursor.position(), "truncated result list");
-                }
-                detail::skip_fast_coordinates(cursor, signature);
-            }
-        }
-        return checks;
+    std::vector<CheckIndexEntry> parse_file(
+        const std::string& path,
+        const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
+        return detail::HeaderPatternIndexReader(path, options).run();
     }
 };
 

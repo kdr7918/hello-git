@@ -86,6 +86,15 @@ int main() {
     RDB_CHECK(index[0].geometry_count == 2);
     RDB_CHECK(index[1].geometry_count == 1);
     RDB_CHECK(index[2].geometry_count == 0);
+
+    rdb::FastCheckIndexOptions small_index_options;
+    small_index_options.read_buffer_bytes = 71;
+    small_index_options.context_bytes = 64;
+    const std::vector<rdb::CheckIndexEntry> small_buffer_index =
+        index_parser.parse_file(sample_path("standard_sample.rdb"), small_index_options);
+    RDB_CHECK(small_buffer_index.size() == 3);
+    RDB_CHECK(small_buffer_index[0].name == "M1.SPACING.1");
+    RDB_CHECK(small_buffer_index[2].offset == index[2].offset);
     RDB_CHECK(index_parser.parse_file(sample_path("large_standard_sample.rdb")).size() == 100);
     RDB_CHECK(index_parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb")).size() == 100);
 
@@ -97,6 +106,12 @@ int main() {
     RDB_CHECK(first_check.results[0].vertices.size() == 4);
     RDB_CHECK(first_check.results[0].properties_before_geometry.size() == 5);
     RDB_CHECK(first_check.results[1].edges.size() == 2);
+
+    const rdb::CheckDetailFile detail_file(sample_path("standard_sample.rdb"));
+    const rdb::CheckDetail second_check = detail_file.parse_at(index[1].offset);
+    RDB_CHECK(second_check.name == "M2.DENSITY.MIN");
+    RDB_CHECK(second_check.results.size() == 1);
+    RDB_CHECK(second_check.results[0].vertices.size() == 4);
 
     const rdb::CheckDetail extended_check = detail_parser.parse_file_at(
         sample_path("post_coordinate_tags_sample.rdb"),
