@@ -1,0 +1,33 @@
+TOP_CHIP 1000
+M1.SPACING.1
+2 2 3 Jul 21 10:32:45 2026
+Rule File Pathname: ./demo.svrf
+Rule File Title: Example Calibre DRC deck
+M1 spacing must be at least 0.14 um.
+p 1 4
+PP M1 spacing marker
+PA 12000000
+EL 3000
+EW 140
+CN INV_X1 c 1 0 0 1 10000 20000
+10000 20000
+14000 20000
+14000 23000
+10000 23000
+e 2 2
+30000 20000 33000 20000
+33000 20000 33000 23000
+M2.DENSITY.MIN
+1 1 2 Jul 21 10:32:46 2026
+Rule File Pathname: ./demo.svrf
+M2 density is below the required threshold.
+p 1 4
+DA M2 0.083
+DV 0.080
+50000 40000
+60000 40000
+60000 50000
+50000 50000
+VIA1.ENCLOSURE
+0 0 1 Jul 21 10:32:47 2026
+Example of a rule check with no remaining defects.

@@ -1,47 +1,22 @@
-cmake_minimum_required(VERSION 3.10)
-project(cpp11_fast_text_parser LANGUAGES CXX)
+cmake_minimum_required(VERSION 3.16)
+project(calibre_ascii_rdb LANGUAGES CXX)
 
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
-option(FASTTEXT_BUILD_TESTS "Build tests" ON)
-option(FASTTEXT_BUILD_BENCHMARK "Build benchmark" ON)
+add_library(calibre_ascii_rdb_parser
+    calibre_ascii_rdb_parser.cpp
+)
+target_include_directories(calibre_ascii_rdb_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(calibre_ascii_rdb_parser PRIVATE
+    $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>
+)
 
-add_library(fast_text_parser INTERFACE)
-target_include_directories(fast_text_parser INTERFACE
-    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>)
-target_compile_features(fast_text_parser INTERFACE cxx_std_11)
-
-add_executable(fast_text_parser_example examples/parse_file.cpp)
-target_link_libraries(fast_text_parser_example PRIVATE fast_text_parser)
-
-add_executable(fast_text_parser_cursor_match_example examples/cursor_match_example.cpp)
-target_link_libraries(fast_text_parser_cursor_match_example PRIVATE fast_text_parser)
-
-if(FASTTEXT_BUILD_TESTS)
-    enable_testing()
-    add_executable(fast_text_parser_tests tests/test_fast_text_parser.cpp)
-    target_link_libraries(fast_text_parser_tests PRIVATE fast_text_parser)
-
-    add_executable(fast_text_parser_tests_portable tests/test_fast_text_parser.cpp)
-    target_link_libraries(fast_text_parser_tests_portable PRIVATE fast_text_parser)
-    target_compile_definitions(fast_text_parser_tests_portable PRIVATE FASTTEXT_STRTOD_L_BACKEND=0)
-
-    if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
-        target_compile_options(fast_text_parser_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
-        target_compile_options(fast_text_parser_tests_portable PRIVATE -Wall -Wextra -Wpedantic -Werror)
-    endif()
-    add_test(NAME fast_text_parser_tests COMMAND fast_text_parser_tests)
-    add_test(NAME fast_text_parser_tests_portable COMMAND fast_text_parser_tests_portable)
-endif()
-
-if(FASTTEXT_BUILD_BENCHMARK)
-    add_executable(fast_text_parser_benchmark benchmark/benchmark.cpp)
-    target_link_libraries(fast_text_parser_benchmark PRIVATE fast_text_parser)
-    if(FASTTEXT_BUILD_TESTS)
-        add_test(NAME fast_text_parser_benchmark_empty
-                 COMMAND fast_text_parser_benchmark
-                         ${CMAKE_CURRENT_SOURCE_DIR}/tests/fixtures/empty.txt)
-    endif()
+include(CTest)
+if(BUILD_TESTING)
+    add_executable(rdb-parser-tests rdb_parser_tests.cpp)
+    target_link_libraries(rdb-parser-tests PRIVATE calibre_ascii_rdb_parser)
+    target_compile_definitions(rdb-parser-tests PRIVATE RDB_SAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+    add_test(NAME rdb-parser-tests COMMAND rdb-parser-tests)
 endif()

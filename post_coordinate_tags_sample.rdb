@@ -1,0 +1,17 @@
+TOP_CHIP 1000
+POST_COORDINATE_TAGS
+2 2 2 Jul 21 10:35:00 2026
+Synthetic extension fixture: tags are deliberately placed after coordinates.
+This is not the documented standard ASCII RDB property location.
+p 1 4
+10000 20000
+14000 20000
+14000 23000
+10000 23000
+PP M1 spacing marker
+PA 12000000
+e 2 1
+30000 20000 33000 20000
+EL 3000
+EW 140
+CN INV_X1 c 1 0 0 1 30000 20000
