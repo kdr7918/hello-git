@@ -1,0 +1,14 @@
+# Customers
+customer-001,Seoul
+customer-002,Busan
+customer-003,Incheon
+## Premium
+customer-101,Gold
+customer-102,Platinum
+# Orders
+order-001,12500
+order-002,8400
+order-003,39900
+## Archived
+order-901,5000
+order-902,11700

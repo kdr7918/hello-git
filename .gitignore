@@ -1,0 +1,13 @@
+# Build output
+build/
+build-*/
+Makefile
+.qmake.stash
+
+# Qt Creator
+*.pro.user
+*.pro.user.*
+CMakeLists.txt.user
+
+# macOS
+.DS_Store
