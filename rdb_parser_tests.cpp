@@ -125,6 +125,10 @@ int main() {
     RDB_CHECK(geometry.results.size() == 3);
     RDB_CHECK(geometry.vertices.size() == 8);
     RDB_CHECK(geometry.edges.size() == 2);
+    RDB_CHECK(geometry.vertices[0].x == 10000);
+    RDB_CHECK(geometry.vertices[0].y == 20000);
+    RDB_CHECK(geometry.edges[0].second.x == 33000);
+    RDB_CHECK(geometry.edges[0].second.y == 20000);
     RDB_CHECK(geometry.checks[0].results.count == 2);
     RDB_CHECK(geometry.checks[1].results.count == 1);
 
