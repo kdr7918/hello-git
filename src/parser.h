@@ -2,8 +2,8 @@
 #define PARSER_H
 
 #include "data_types.h"
+#include "fast_text_reader.h"
 
-#include <QByteArray>
 #include <QString>
 
 // Replace this interface when the real record format is known.  Thread
@@ -16,7 +16,7 @@ public:
     virtual bool parseLine(qint64 sectionId,
                            qint64 lineNumber,
                            quint64 sourceOffset,
-                           const QByteArray &line,
+                           ByteView line,
                            DataRow *row) const = 0;
 };
 
@@ -27,10 +27,10 @@ public:
     bool parseLine(qint64 sectionId,
                    qint64 lineNumber,
                    quint64 sourceOffset,
-                   const QByteArray &line,
+                   ByteView line,
                    DataRow *row) const override;
 };
 
-bool parseHeading(const QByteArray &line, int *level, QString *title);
+bool parseHeading(ByteView line, int *level, QString *title);
 
 #endif // PARSER_H

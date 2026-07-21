@@ -26,6 +26,74 @@ order-001,12500
 
 목차 행은 `#` 개수로 계층을 표현합니다. 데이터 행은 예제용 `SimpleRecordParser`가 첫 번째 쉼표 또는 탭을 기준으로 Key/Value를 나눕니다. 실제 포맷을 적용할 때는 `IRecordParser::parseLine()` 구현만 교체하면 됩니다.
 
+## 고속 텍스트 파서
+
+`FastTextReader`는 `QFile::read()`로 기본 1 MiB 버퍼를 채우고 `memchr()`로 개행을 한 번씩만 검색합니다. `QFile::readLine()`, 라인별 `QByteArray`, `QString` 변환을 사용하지 않습니다. 버퍼 경계를 넘는 긴 라인만 내부 버퍼를 확장하고, 일반 라인은 `ByteView`로 참조하므로 라인 및 split 결과의 바이트 복사가 없습니다.
+
+현재 라인을 처리하면서 다음 라인을 안전하게 참조할 수 있습니다. 두 View는 다음 `nextWindow()`, `seek()`, `setRange()`, `close()` 호출 전까지 유효합니다.
+
+```cpp
+FastTextReader reader;
+reader.open(fileName);
+
+LineWindow window;
+while (reader.nextWindow(&window)) {
+    const LineView &line = window.current;
+
+    // 현재 라인 처리 중 다음 라인 look-ahead
+    if (window.hasNext && window.next.bytes.startsWith('#')) {
+        // next line is a heading
+    }
+
+    // 쉼표 split: 원본 버퍼를 가리키므로 문자열 복사가 없음
+    QVector<ByteView> columns;
+    line.bytes.split(',', &columns);
+
+    // 또는 allocation 없는 필드 커서와 숫자 파서
+    FieldCursor fields = line.fields(',');
+    ByteView name;
+    qint64 count = 0;
+    double ratio = 0.0;
+    fields.readString(&name);
+    fields.readInt64(&count);
+    fields.readDouble(&ratio);
+
+    // memchr 기반 문자 검색과 절대 파일 위치
+    const qint64 commaOffset = line.findAbsolute(',');
+
+    // 정규식은 편의 경로이며 UTF-8 -> QString 변환 비용이 있으므로
+    // 성능이 중요한 단순 검색에는 findAbsolute()/ByteView::find() 사용
+    RegexHit hit;
+    line.findRegex(QRegularExpression("ID=[0-9]+"), &hit);
+
+    // 나중에 정확히 같은 라인으로 복귀 가능한 위치
+    const SeekPoint saved = line.seekPoint();
+}
+```
+
+저장한 위치 또는 임의의 바이트 범위로 바로 이동할 수 있습니다.
+
+```cpp
+reader.seek(saved);
+reader.setRange(sectionBegin, sectionEnd, firstLineNumber);
+```
+
+`LineView`에는 `beginOffset`, `contentEndOffset`, `nextOffset`, `lineNumber`가 있으며, `FieldCursor::lastSourceSpan()`으로 마지막 필드의 절대 바이트 범위도 얻을 수 있습니다. 숫자 파서는 locale과 임시 문자열 없이 부호 있는/없는 64비트 정수, 소수 및 지수 표기 실수를 읽습니다.
+
+### 테스트와 처리량 비교
+
+```sh
+cmake -S . -B build -DBUILD_TESTING=ON
+cmake --build build --parallel
+ctest --test-dir build --output-on-failure
+
+cmake -S . -B build-bench -DBUILD_FAST_PARSER_BENCHMARK=ON
+cmake --build build-bench --parallel
+./build-bench/fast-parser-benchmark /path/to/large-file.txt
+```
+
+벤치마크는 동일한 1 MiB `read + memchr` 기준 구현과 `FastTextReader`의 라인 수, 소비 바이트, MiB/s를 비교합니다. 정규식은 의도적으로 핫패스 밖의 편의 기능입니다.
+
 ## Qt 5.9 빌드
 
 qmake:

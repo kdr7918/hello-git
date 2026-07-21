@@ -1,8 +1,8 @@
 #include "workers.h"
 
+#include "fast_text_reader.h"
 #include "parser.h"
 
-#include <QFile>
 #include <QThread>
 #include <QVector>
 
@@ -37,33 +37,34 @@ TocParseWorker::TocParseWorker(const QString &filePath, QObject *parent)
 
 void TocParseWorker::process()
 {
-    QFile file(m_filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        emit failed(tr("Cannot open %1: %2").arg(m_filePath, file.errorString()));
+    FastTextReader reader;
+    if (!reader.open(m_filePath)) {
+        emit failed(tr("Cannot open %1: %2").arg(m_filePath, reader.errorString()));
         emit workFinished();
         return;
     }
 
-    const qint64 total = file.size();
+    const qint64 total = reader.fileSize();
     qint64 lastReported = -4 * 1024 * 1024;
     qint64 nextId = 0;
     int activeEntry = -1;
     QVector<TocEntry> entries;
     QVector<QPair<int, qint64> > ancestors;
 
-    while (!file.atEnd()) {
+    LineWindow window;
+    while (reader.nextWindow(&window)) {
         if (interrupted()) {
             emit cancelled();
             emit workFinished();
             return;
         }
 
-        const qint64 lineStart = file.pos();
-        const QByteArray line = file.readLine();
+        const LineView &line = window.current;
+        const qint64 lineStart = line.beginOffset;
         int level = 0;
         QString title;
 
-        if (parseHeading(line, &level, &title)) {
+        if (parseHeading(line.bytes, &level, &title)) {
             if (activeEntry >= 0) {
                 TocEntry &previous = entries[activeEntry];
                 previous.byteLength = lineStart - previous.byteOffset;
@@ -77,11 +78,11 @@ void TocParseWorker::process()
             entry.parentId = ancestors.isEmpty() ? -1 : ancestors.last().second;
             entry.level = level;
             entry.title = title;
-            entry.byteOffset = file.pos();
+            entry.byteOffset = line.nextOffset;
             entries.append(entry);
             activeEntry = entries.size() - 1;
             ancestors.append(qMakePair(level, entry.id));
-        } else if (!line.trimmed().isEmpty()) {
+        } else if (!line.bytes.trimmed().isEmpty()) {
             if (activeEntry < 0) {
                 TocEntry preamble;
                 preamble.id = nextId++;
@@ -96,7 +97,13 @@ void TocParseWorker::process()
             ++entries[activeEntry].estimatedRows;
         }
 
-        emitTocProgress(this, file.pos(), total, &lastReported);
+        emitTocProgress(this, line.nextOffset, total, &lastReported);
+    }
+
+    if (reader.hasError()) {
+        emit failed(tr("Read failed: %1").arg(reader.errorString()));
+        emit workFinished();
+        return;
     }
 
     if (activeEntry >= 0) {
@@ -118,9 +125,9 @@ FullParseWorker::FullParseWorker(const QString &filePath,
 
 void FullParseWorker::process()
 {
-    QFile file(m_filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
-        emit failed(tr("Cannot open %1: %2").arg(m_filePath, file.errorString()));
+    FastTextReader reader;
+    if (!reader.open(m_filePath)) {
+        emit failed(tr("Cannot open %1: %2").arg(m_filePath, reader.errorString()));
         emit workFinished();
         return;
     }
@@ -137,8 +144,12 @@ void FullParseWorker::process()
 
     for (int sectionIndex = 0; sectionIndex < m_entries.size(); ++sectionIndex) {
         const TocEntry &entry = m_entries.at(sectionIndex);
-        if (!file.seek(entry.byteOffset)) {
-            emit failed(tr("Cannot seek to offset %1").arg(entry.byteOffset));
+        if (!reader.setRange(entry.byteOffset,
+                             entry.byteOffset + entry.byteLength,
+                             1)) {
+            emit failed(tr("Cannot seek to offset %1: %2")
+                            .arg(entry.byteOffset)
+                            .arg(reader.errorString()));
             emit workFinished();
             return;
         }
@@ -147,28 +158,22 @@ void FullParseWorker::process()
         if (entry.estimatedRows > 0 && entry.estimatedRows < 100000000)
             rows.reserve(static_cast<int>(entry.estimatedRows));
 
-        qint64 remaining = entry.byteLength;
-        qint64 lineNumber = 0;
-        while (remaining > 0 && !file.atEnd()) {
+        LineWindow window;
+        while (reader.nextWindow(&window)) {
             if (interrupted()) {
                 emit cancelled();
                 emit workFinished();
                 return;
             }
 
-            const qint64 sourceOffset = file.pos();
-            const QByteArray line = file.readLine(remaining + 1);
-            if (line.isEmpty())
-                break;
-            remaining -= line.size();
-            completed += line.size();
-            ++lineNumber;
+            const LineView &line = window.current;
+            completed += line.nextOffset - line.beginOffset;
 
             DataRow row;
             if (parser.parseLine(entry.id,
-                                 lineNumber,
-                                 static_cast<quint64>(sourceOffset),
-                                 line,
+                                 line.lineNumber,
+                                 static_cast<quint64>(line.beginOffset),
+                                 line.bytes,
                                  &row)) {
                 rows.append(row);
             }
@@ -177,6 +182,11 @@ void FullParseWorker::process()
                 emit progress(completed, total);
                 lastReported = completed;
             }
+        }
+        if (reader.hasError()) {
+            emit failed(tr("Read failed: %1").arg(reader.errorString()));
+            emit workFinished();
+            return;
         }
     }
 
@@ -198,16 +208,20 @@ SectionParseWorker::SectionParseWorker(const QString &filePath,
 
 void SectionParseWorker::process()
 {
-    QFile file(m_filePath);
-    if (!file.open(QIODevice::ReadOnly)) {
+    FastTextReader reader;
+    if (!reader.open(m_filePath)) {
         emit failed(m_generation,
-                    tr("Cannot open %1: %2").arg(m_filePath, file.errorString()));
+                    tr("Cannot open %1: %2").arg(m_filePath, reader.errorString()));
         emit workFinished();
         return;
     }
-    if (!file.seek(m_entry.byteOffset)) {
+    if (!reader.setRange(m_entry.byteOffset,
+                         m_entry.byteOffset + m_entry.byteLength,
+                         1)) {
         emit failed(m_generation,
-                    tr("Cannot seek to offset %1").arg(m_entry.byteOffset));
+                    tr("Cannot seek to offset %1: %2")
+                        .arg(m_entry.byteOffset)
+                        .arg(reader.errorString()));
         emit workFinished();
         return;
     }
@@ -215,29 +229,23 @@ void SectionParseWorker::process()
     SimpleRecordParser parser;
     QVector<DataRow> batch;
     batch.reserve(kBatchSize);
-    qint64 remaining = m_entry.byteLength;
-    qint64 lineNumber = 0;
     bool firstBatch = true;
 
-    while (remaining > 0 && !file.atEnd()) {
+    LineWindow window;
+    while (reader.nextWindow(&window)) {
         if (interrupted()) {
             emit cancelled(m_generation);
             emit workFinished();
             return;
         }
 
-        const qint64 sourceOffset = file.pos();
-        const QByteArray line = file.readLine(remaining + 1);
-        if (line.isEmpty())
-            break;
-        remaining -= line.size();
-        ++lineNumber;
+        const LineView &line = window.current;
 
         DataRow row;
         if (parser.parseLine(m_entry.id,
-                             lineNumber,
-                             static_cast<quint64>(sourceOffset),
-                             line,
+                             line.lineNumber,
+                             static_cast<quint64>(line.beginOffset),
+                             line.bytes,
                              &row)) {
             batch.append(row);
         }
@@ -248,6 +256,12 @@ void SectionParseWorker::process()
             batch.clear();
             batch.reserve(kBatchSize);
         }
+    }
+
+    if (reader.hasError()) {
+        emit failed(m_generation, tr("Read failed: %1").arg(reader.errorString()));
+        emit workFinished();
+        return;
     }
 
     if (!batch.isEmpty() || firstBatch)

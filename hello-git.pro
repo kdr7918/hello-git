@@ -11,6 +11,7 @@ INCLUDEPATH += src
 SOURCES += \
     src/main.cpp \
     src/main_window.cpp \
+    src/fast_text_reader.cpp \
     src/parser.cpp \
     src/workers.cpp \
     src/toc_tree_model.cpp \
@@ -18,6 +19,7 @@ SOURCES += \
 
 HEADERS += \
     src/data_types.h \
+    src/fast_text_reader.h \
     src/main_window.h \
     src/parser.h \
     src/workers.h \
