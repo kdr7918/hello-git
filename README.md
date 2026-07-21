@@ -1,12 +1,12 @@
-# Calibre ASCII RDB parser (C++11)
+# ASCII RDB parser (C++11)
 
 Compact, dependency-free C++11 parser for the ASCII Results Database (RDB)
-emitted by Calibre DRC flows.  It reads a file sequentially and returns a
+emitted by DRC flows.  It reads a file sequentially and returns a
 fully materialized, memory-conscious `Database` model suitable for a Qt table
 or tree model.
 
 The repository includes synthetic RDB fixtures only; validate the parser with
-an actual Calibre output before treating every optional tag or layout variant
+an actual production output before treating every optional tag or layout variant
 as supported.
 
 ## What is parsed
@@ -55,28 +55,28 @@ dependencies and does not require Qt.
 ## Basic use
 
 ```cpp
-#include "calibre_ascii_rdb_parser.hpp"
+#include "ascii_rdb_parser.hpp"
 
-calibre::rdb::ParseOptions options;
+rdb::ParseOptions options;
 options.allow_properties_after_geometry = true;
 
-calibre::rdb::AsciiRdbParser parser;
-calibre::rdb::Database database = parser.parse_file("result.rdb", options);
+rdb::AsciiRdbParser parser;
+rdb::Database database = parser.parse_file("result.rdb", options);
 
 for (std::size_t i = 0; i < database.rule_checks.size(); ++i) {
-    const calibre::rdb::RuleCheck& check = database.rule_checks[i];
+    const rdb::RuleCheck& check = database.rule_checks[i];
     // check.results indexes database.results.
 }
 ```
 
-Malformed input and model-capacity overflows throw `calibre::rdb::ParseError`
+Malformed input and model-capacity overflows throw `rdb::ParseError`
 or `std::length_error`.  `ParseError` contains the source byte offset and line
 number, which can be reported directly in a UI.
 
 ## Repository layout
 
-- `calibre_ascii_rdb.hpp` — compact public data model
-- `calibre_ascii_rdb_parser.hpp/.cpp` — full one-pass parser
+- `ascii_rdb.hpp` — compact public data model
+- `ascii_rdb_parser.hpp/.cpp` — full one-pass parser
 - `rdb_parser_tests.cpp` — executable test suite
 - `*_sample.rdb` — small and large synthetic fixtures
 

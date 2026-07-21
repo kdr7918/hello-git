@@ -1,14 +1,13 @@
-#ifndef CALIBRE_ASCII_RDB_PARSER_HPP
-#define CALIBRE_ASCII_RDB_PARSER_HPP
+#ifndef ASCII_RDB_PARSER_HPP
+#define ASCII_RDB_PARSER_HPP
 
-#include "calibre_ascii_rdb.hpp"
+#include "ascii_rdb.hpp"
 
 #include <cstddef>
 #include <cstdint>
 #include <stdexcept>
 #include <string>
 
-namespace calibre {
 namespace rdb {
 
 typedef std::uint64_t FileOffset;
@@ -45,6 +44,5 @@ public:
 };
 
 } // namespace rdb
-} // namespace calibre
 
-#endif // CALIBRE_ASCII_RDB_PARSER_HPP
+#endif // ASCII_RDB_PARSER_HPP

@@ -1,4 +1,4 @@
-#include "calibre_ascii_rdb_parser.hpp"
+#include "ascii_rdb_parser.hpp"
 
 #include <cerrno>
 #include <cstring>
@@ -9,7 +9,6 @@
 #include <unordered_map>
 #include <unistd.h>
 
-namespace calibre {
 namespace rdb {
 namespace {
 
@@ -619,4 +618,3 @@ Database AsciiRdbParser::parse_file(const std::string& path, const ParseOptions&
 }
 
 } // namespace rdb
-} // namespace calibre

@@ -2,7 +2,7 @@ TOP_CHIP 1000
 M1.SPACING.1
 2 2 3 Jul 21 10:32:45 2026
 Rule File Pathname: ./demo.svrf
-Rule File Title: Example Calibre DRC deck
+Rule File Title: Example DRC deck
 M1 spacing must be at least 0.14 um.
 p 1 4
 PP M1 spacing marker

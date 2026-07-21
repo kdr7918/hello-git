@@ -1,5 +1,5 @@
-#ifndef CALIBRE_ASCII_RDB_HPP
-#define CALIBRE_ASCII_RDB_HPP
+#ifndef ASCII_RDB_HPP
+#define ASCII_RDB_HPP
 
 #include <cstddef>
 #include <cstdint>
@@ -8,11 +8,10 @@
 #include <string>
 #include <vector>
 
-namespace calibre {
 namespace rdb {
 
 /*
- * Compact C++11 data model for a Calibre ASCII DRC Results Database (RDB).
+ * Compact C++11 data model for an ASCII DRC Results Database (RDB).
  *
  * Design rules:
  * - No per-result std::vector or std::string allocation.
@@ -21,7 +20,7 @@ namespace rdb {
  * - Text is stored once in StringTable and referred to by 32-bit StringId.
  *
  * The model has no parser and no Qt dependency.  Coordinates remain signed
- * 64-bit integers, even though many Calibre databases fit in 32 bits.
+ * 64-bit integers, even though many databases fit in 32 bits.
  */
 
 typedef std::uint32_t StringId;
@@ -242,6 +241,5 @@ struct Database {
 };
 
 } // namespace rdb
-} // namespace calibre
 
-#endif // CALIBRE_ASCII_RDB_HPP
+#endif // ASCII_RDB_HPP
