@@ -16,10 +16,17 @@ if(FASTTEXT_BUILD_TESTS)
     enable_testing()
     add_executable(fast_text_parser_tests tests/test_fast_text_parser.cpp)
     target_link_libraries(fast_text_parser_tests PRIVATE fast_text_parser)
+
+    add_executable(fast_text_parser_tests_portable tests/test_fast_text_parser.cpp)
+    target_link_libraries(fast_text_parser_tests_portable PRIVATE fast_text_parser)
+    target_compile_definitions(fast_text_parser_tests_portable PRIVATE FASTTEXT_STRTOD_L_BACKEND=0)
+
     if(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
         target_compile_options(fast_text_parser_tests PRIVATE -Wall -Wextra -Wpedantic -Werror)
+        target_compile_options(fast_text_parser_tests_portable PRIVATE -Wall -Wextra -Wpedantic -Werror)
     endif()
     add_test(NAME fast_text_parser_tests COMMAND fast_text_parser_tests)
+    add_test(NAME fast_text_parser_tests_portable COMMAND fast_text_parser_tests_portable)
 endif()
 
 if(FASTTEXT_BUILD_BENCHMARK)

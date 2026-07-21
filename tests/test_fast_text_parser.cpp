@@ -2,6 +2,7 @@
 
 #include <cstdio>
 #include <cstdlib>
+#include <clocale>
 #include <iostream>
 #include <regex>
 #include <string>
@@ -138,6 +139,78 @@ void test_cursor_numbers_alpha_and_words() {
     CHECK(!bad.read_uint64(&unsigned_value));
 }
 
+void test_string_view_classification_and_numeric_values() {
+    CHECK(StringView("AlphaOnly").is_alpha());
+    CHECK(!StringView("").is_alpha());
+    CHECK(!StringView("Alpha42").is_alpha());
+    CHECK(!StringView("한글").is_alpha());
+
+    CHECK(StringView("-42").is_integer());
+    CHECK(StringView("+42").is_integer());
+    CHECK(!StringView("42.0").is_integer());
+    CHECK(!StringView(" 42").is_integer());
+    CHECK(!StringView("+").is_integer());
+
+    CHECK(StringView("42").is_number());
+    CHECK(StringView("-3.125e+2").is_number());
+    CHECK(StringView(".5").is_number());
+    CHECK(!StringView("1e").is_number());
+    CHECK(!StringView("12x").is_number());
+    CHECK(!StringView("").is_number());
+
+    std::int64_t signed_value = 7;
+    std::uint64_t unsigned_value = 7;
+    double number_value = 7.0;
+    CHECK(StringView("-9223372036854775808").to_int64(&signed_value));
+    CHECK(signed_value == INT64_MIN);
+    CHECK(StringView("18446744073709551615").to_uint64(&unsigned_value));
+    CHECK(unsigned_value == UINT64_MAX);
+    CHECK(StringView("-3.125e2").to_double(&number_value));
+    CHECK(number_value == -312.5);
+
+    unsigned_value = 99;
+    CHECK(!StringView("-1").to_uint64(&unsigned_value));
+    CHECK(unsigned_value == 99u);
+
+    number_value = 99.0;
+    CHECK(!StringView("1e9999").to_double(&number_value));
+    CHECK(number_value == 99.0);
+    CHECK(!StringView("1e-9999").to_double(&number_value));
+    CHECK(number_value == 99.0);
+    CHECK(StringView("0e-9999").to_double(&number_value));
+    CHECK(number_value == 0.0);
+
+    const char embedded_nul[] = {'1', '2', '\0', '3'};
+    CHECK(!StringView(embedded_nul, sizeof(embedded_nul)).is_number());
+
+    signed_value = 99;
+    CHECK(!StringView("9223372036854775808").to_int64(&signed_value));
+    CHECK(signed_value == 99);
+    CHECK(StringView("-42").int64_value() == -42);
+    CHECK(StringView("bad").int64_value(123) == 123);
+    CHECK(StringView("42").uint64_value() == 42u);
+    CHECK(StringView("-1").uint64_value(123u) == 123u);
+    CHECK(StringView("2.5").number_value() == 2.5);
+    CHECK(StringView("bad").number_value(1.25) == 1.25);
+
+    const StringView invalid(NULL, 5u);
+    CHECK(!invalid.is_alpha());
+    CHECK(!invalid.is_integer());
+    CHECK(!invalid.is_number());
+
+    const char* current_locale = std::setlocale(LC_NUMERIC, NULL);
+    const std::string saved_locale = current_locale == NULL ? "C" : current_locale;
+    const char* changed = std::setlocale(LC_NUMERIC, "de_DE.UTF-8");
+    if (changed == NULL) changed = std::setlocale(LC_NUMERIC, "de_DE.utf8");
+    if (changed != NULL) {
+        number_value = 0.0;
+        CHECK(StringView("1.5").to_double(&number_value));
+        CHECK(number_value == 1.5);
+        CHECK(StringView("1.5").is_number());
+    }
+    CHECK(std::setlocale(LC_NUMERIC, saved_locale.c_str()) != NULL);
+}
+
 void test_split_find_word_and_regex() {
     const StringView line("alpha,beta,,alphabet alpha42 alpha ERROR-123");
     std::vector<StringView> parts = fasttext::split(line, ',');
@@ -222,6 +295,7 @@ int main() {
     test_seek_roundtrip_for_consecutive_empty_lines();
     test_null_memory_range_is_empty();
     test_cursor_numbers_alpha_and_words();
+    test_string_view_classification_and_numeric_values();
     test_split_find_word_and_regex();
     test_trim_and_zero_allocation_split_callback();
     test_read_buffer_file_and_offset_roundtrip();

@@ -11,8 +11,11 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <locale>
+#include <locale.h>
 #include <memory>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -24,6 +27,17 @@
 #define FASTTEXT_HAS_MMAP 1
 #else
 #define FASTTEXT_HAS_MMAP 0
+#endif
+
+#ifndef FASTTEXT_STRTOD_L_BACKEND
+#if defined(_WIN32)
+#define FASTTEXT_STRTOD_L_BACKEND 2
+#elif defined(__GLIBC__) || defined(__APPLE__) || defined(__FreeBSD__) || \
+      defined(__NetBSD__) || defined(__OpenBSD__)
+#define FASTTEXT_STRTOD_L_BACKEND 1
+#else
+#define FASTTEXT_STRTOD_L_BACKEND 0
+#endif
 #endif
 
 namespace fasttext {
@@ -42,7 +56,7 @@ public:
     explicit StringView(const std::string& text)
         : data(text.data()), size(text.size()), offset(0) {}
     StringView(const char* text, std::size_t length, std::size_t absolute_offset = 0)
-        : data(text), size(length), offset(absolute_offset) {}
+        : data(text), size(text == NULL ? 0 : length), offset(absolute_offset) {}
 
     bool empty() const { return size == 0; }
     const char* begin() const { return data; }
@@ -59,6 +73,16 @@ public:
     std::string to_string() const {
         return data == NULL ? std::string() : std::string(data, size);
     }
+
+    bool is_alpha() const;
+    bool is_integer() const;
+    bool is_number() const;
+    bool to_int64(std::int64_t* output) const;
+    bool to_uint64(std::uint64_t* output) const;
+    bool to_double(double* output) const;
+    std::int64_t int64_value(std::int64_t fallback = 0) const;
+    std::uint64_t uint64_value(std::uint64_t fallback = 0) const;
+    double number_value(double fallback = 0.0) const;
 };
 
 inline bool operator==(const StringView& left, const StringView& right) {
@@ -173,6 +197,21 @@ inline bool regex_find(StringView value, const std::regex& expression, Match* ou
     return true;
 }
 
+#if FASTTEXT_STRTOD_L_BACKEND == 1
+inline locale_t numeric_c_locale() {
+    // Intentionally process-lifetime: avoids static-destruction-order use-after-free.
+    static locale_t* locale = new locale_t(
+        ::newlocale(LC_NUMERIC_MASK, "C", static_cast<locale_t>(0)));
+    return *locale;
+}
+#elif FASTTEXT_STRTOD_L_BACKEND == 2
+inline _locale_t numeric_c_locale() {
+    // Intentionally process-lifetime: avoids static-destruction-order use-after-free.
+    static _locale_t* locale = new _locale_t(::_create_locale(LC_NUMERIC, "C"));
+    return *locale;
+}
+#endif
+
 class Cursor {
 public:
     explicit Cursor(StringView input) : input_(input), position_(0) {}
@@ -279,14 +318,17 @@ public:
         std::size_t cursor = position_;
         if (cursor < input_.size && (input_[cursor] == '-' || input_[cursor] == '+')) ++cursor;
         bool has_digit = false;
+        bool has_nonzero_digit = false;
         while (cursor < input_.size && is_digit(input_[cursor])) {
             has_digit = true;
+            has_nonzero_digit = has_nonzero_digit || input_[cursor] != '0';
             ++cursor;
         }
         if (cursor < input_.size && input_[cursor] == '.') {
             ++cursor;
             while (cursor < input_.size && is_digit(input_[cursor])) {
                 has_digit = true;
+                has_nonzero_digit = has_nonzero_digit || input_[cursor] != '0';
                 ++cursor;
             }
         }
@@ -311,9 +353,26 @@ public:
             token = large.c_str();
         }
         errno = 0;
+        double value = 0.0;
+#if FASTTEXT_STRTOD_L_BACKEND == 1
+        const locale_t locale = numeric_c_locale();
+        if (locale == static_cast<locale_t>(0)) return false;
         char* end = NULL;
-        const double value = std::strtod(token, &end);
-        if (end != token + length || errno == ERANGE) return false;
+        value = ::strtod_l(token, &end, locale);
+        if (end != token + length) return false;
+#elif FASTTEXT_STRTOD_L_BACKEND == 2
+        const _locale_t locale = numeric_c_locale();
+        if (locale == NULL) return false;
+        char* end = NULL;
+        value = ::_strtod_l(token, &end, locale);
+        if (end != token + length) return false;
+#else
+        std::istringstream stream(std::string(token, length));
+        stream.imbue(std::locale::classic());
+        stream >> value;
+        if (!stream || stream.peek() != std::char_traits<char>::eof()) return false;
+#endif
+        if (!std::isfinite(value) || (value == 0.0 && has_nonzero_digit)) return false;
         position_ = cursor;
         if (output != NULL) *output = value;
         return true;
@@ -323,6 +382,68 @@ private:
     StringView input_;
     std::size_t position_;
 };
+
+inline bool StringView::is_alpha() const {
+    if (empty()) return false;
+    for (std::size_t index = 0; index < size; ++index) {
+        if (!fasttext::is_alpha(data[index])) return false;
+    }
+    return true;
+}
+
+inline bool StringView::is_integer() const {
+    if (empty()) return false;
+    std::size_t index = 0;
+    if (data[index] == '+' || data[index] == '-') ++index;
+    if (index == size) return false;
+    for (; index < size; ++index) {
+        if (!is_digit(data[index])) return false;
+    }
+    return true;
+}
+
+inline bool StringView::to_int64(std::int64_t* output) const {
+    Cursor cursor(*this);
+    std::int64_t value = 0;
+    if (!cursor.read_int64(&value) || !cursor.empty()) return false;
+    if (output != NULL) *output = value;
+    return true;
+}
+
+inline bool StringView::to_uint64(std::uint64_t* output) const {
+    Cursor cursor(*this);
+    std::uint64_t value = 0;
+    if (!cursor.read_uint64(&value) || !cursor.empty()) return false;
+    if (output != NULL) *output = value;
+    return true;
+}
+
+inline bool StringView::to_double(double* output) const {
+    Cursor cursor(*this);
+    double value = 0.0;
+    if (!cursor.read_double(&value) || !cursor.empty()) return false;
+    if (output != NULL) *output = value;
+    return true;
+}
+
+inline bool StringView::is_number() const {
+    return to_double(NULL);
+}
+
+inline std::int64_t StringView::int64_value(std::int64_t fallback) const {
+    std::int64_t value = 0;
+    return to_int64(&value) ? value : fallback;
+}
+
+inline std::uint64_t StringView::uint64_value(std::uint64_t fallback) const {
+    std::uint64_t value = 0;
+    return to_uint64(&value) ? value : fallback;
+}
+
+inline double StringView::number_value(double fallback) const {
+    double value = 0.0;
+    return to_double(&value) ? value : fallback;
+}
 
 class ReadBuffer {
 public:

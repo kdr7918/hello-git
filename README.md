@@ -152,7 +152,38 @@ if (cursor.read_int64(&id)) {
 - `skip_spaces()`
 - `position()`, `absolute_offset()`, `remaining()`
 
-`read_double()`은 편의를 위한 정확성 우선 경로입니다. 부동소수 변환이 병목이면 C++11 호환 `fast_float` 같은 bounded parser를 별도 backend로 연결하는 것이 좋습니다.
+`StringView` 자체에서도 token 전체를 바로 검사하고 값으로 바꿀 수 있습니다.
+
+```cpp
+fasttext::StringView token("-3.125e2");
+
+bool alphabet_only = token.is_alpha();   // 비어 있지 않은 ASCII 알파벳만
+bool integer_syntax = token.is_integer(); // 부호 + 십진 정수 문법
+bool numeric = token.is_number();         // token 전체가 변환 가능한 숫자
+
+double value;
+if (token.to_double(&value)) {
+    // value == -312.5
+}
+
+std::int64_t integer;
+token.to_int64(&integer);                 // overflow 검사
+std::uint64_t unsigned_integer;
+token.to_uint64(&unsigned_integer);       // overflow 검사
+
+// 변환 실패 시 지정한 fallback을 즉시 반환
+std::int64_t id = token.int64_value(-1);
+std::uint64_t unsigned_id = token.uint64_value(0);
+double number = token.number_value(0.0);
+```
+
+- `is_alpha()`는 빈 문자열과 숫자/기호/비ASCII 문자를 거부합니다.
+- `is_integer()`는 문법만 검사하며 값 범위는 검사하지 않습니다.
+- `to_int64()`/`to_uint64()`는 전체 token과 범위를 모두 검사합니다.
+- 변환 실패 시 output 인자를 변경하지 않습니다.
+- 앞뒤 공백은 자동 허용하지 않으므로 필요하면 먼저 `trim()`을 사용합니다.
+
+`read_double()`과 `StringView::to_double()`은 편의를 위한 정확성 우선 경로입니다. 지원되는 POSIX/Windows에서는 process-lifetime C numeric locale과 `strtod_l`/`_strtod_l`을 사용하고, 그 외 플랫폼에서는 `std::locale::classic()` fallback을 사용합니다. 따라서 프로세스의 `LC_NUMERIC` 설정과 무관하게 `.`을 소수점으로 해석합니다. overflow와 0으로 소실되는 underflow는 모든 backend에서 실패로 처리하며 output을 변경하지 않습니다. 부동소수 변환이 병목이면 C++11 호환 `fast_float` 같은 bounded parser를 별도 backend로 연결하는 것이 좋습니다.
 
 ## split / find / word / regex
 
