@@ -1,0 +1,7 @@
+build/
+build-*/
+*.o
+*.out
+fast_text_parser_example
+fast_text_parser_tests
+fast_text_parser_benchmark
