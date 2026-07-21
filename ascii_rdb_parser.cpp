@@ -13,6 +13,7 @@ namespace rdb {
 namespace {
 
 struct LineView {
+    // 현재 줄을 복사하지 않고 버퍼 내부 포인터와 파일 위치로 표현한다.
     const char* data;
     std::size_t size;
     FileOffset offset;
@@ -24,6 +25,7 @@ struct LineView {
 };
 
 struct StoredLine {
+    // 다음 RuleCheck 경계를 미리 읽었을 때, 다시 처리하기 위해 그 줄만 복사해 둔다.
     std::string text;
     FileOffset offset;
     FileOffset next_offset;
@@ -33,6 +35,7 @@ struct StoredLine {
 };
 
 struct Span {
+    // 널 종료 문자열이 아닌 파일 버퍼 일부를 [begin, end)로 표현한다.
     const char* begin;
     const char* end;
 
@@ -51,18 +54,21 @@ bool is_space(char value) {
 }
 
 Span trim(Span value) {
+    // 원본 버퍼를 수정하지 않고 앞뒤 공백이 제외된 범위만 돌려준다.
     while (value.begin != value.end && is_space(*value.begin)) ++value.begin;
     while (value.begin != value.end && is_space(*(value.end - 1))) --value.end;
     return value;
 }
 
 Span content(const LineView& line) {
+    // Windows CRLF 파일의 '\r'은 줄 내용에서 제외한다.
     const char* end = line.data + line.size;
     if (end != line.data && *(end - 1) == '\r') --end;
     return Span(line.data, end);
 }
 
 bool next_word(Span& input, Span& word) {
+    // 문자열을 복사하지 않고 첫 단어를 꺼낸다. input은 다음 단어 앞으로 이동한다.
     input = trim(input);
     if (input.empty()) return false;
     const char* end = input.begin;
@@ -73,6 +79,7 @@ bool next_word(Span& input, Span& word) {
 }
 
 bool parse_unsigned(Span value, std::uint64_t& result) {
+    // std::strtoull은 널 종료 문자열을 기대하므로, 파일 버퍼를 바로 읽기 위해 직접 변환한다.
     if (value.empty()) return false;
     std::uint64_t parsed = 0;
     for (const char* it = value.begin; it != value.end; ++it) {
@@ -86,6 +93,7 @@ bool parse_unsigned(Span value, std::uint64_t& result) {
 }
 
 bool parse_signed(Span value, std::int64_t& result) {
+    // 좌표 부호와 int64_t 최솟값(-2^63)까지 안전하게 처리한다.
     if (value.empty()) return false;
     bool negative = false;
     if (*value.begin == '+' || *value.begin == '-') {
@@ -137,6 +145,7 @@ public:
     }
 
     bool next(LineView& line) {
+        // 대부분의 줄은 buffer_ 안에 있으므로 메모리 할당 없이 memchr로 '\n'을 찾는다.
         overflow_.clear();
         bool has_overflow = false;
         const FileOffset line_offset = position();
@@ -174,6 +183,7 @@ public:
                 return true;
             }
 
+            // 한 줄이 버퍼 경계를 넘으면 그 줄만 overflow_에 이어 붙인다.
             append_overflow(begin, available_ - position_);
             has_overflow = true;
             position_ = available_;
@@ -182,6 +192,7 @@ public:
 
 private:
     bool refill() {
+        // read()가 EINTR로 끊긴 경우에는 재시도하고, EOF는 한 번만 기록한다.
         if (eof_) return false;
         buffer_offset_ = next_read_offset_;
         for (;;) {
@@ -205,6 +216,7 @@ private:
     }
 
     void append_overflow(const char* text, std::size_t size) {
+        // 잘못된 파일이 무한히 긴 한 줄을 만들지 못하게 상한을 검사한다.
         if (size > max_line_bytes_ || overflow_.size() > max_line_bytes_ - size) {
             throw std::length_error("RDB input line exceeds configured maximum length");
         }
@@ -224,6 +236,7 @@ private:
 };
 
 struct ResultSignature {
+    // "p 순번 좌표수" 또는 "e 순번 좌표수" 줄을 해석한 결과다.
     ResultKind kind;
     std::uint64_t ordinal;
     std::uint64_t geometry_count;
@@ -231,6 +244,7 @@ struct ResultSignature {
 };
 
 struct RuleHeader {
+    // "현재 결과 수 원래 결과 수 check text 줄 수 시간" 헤더의 분해 결과다.
     std::uint64_t current_result_count;
     std::uint64_t original_result_count;
     std::uint64_t check_text_line_count;
@@ -257,6 +271,7 @@ bool parse_rule_header(Span text, RuleHeader& result) {
 }
 
 bool parse_point(Span text, Point& result) {
+    // p 결과의 좌표 행은 정확히 x y 두 정수여야 한다.
     Span word;
     if (!next_word(text, word) || !parse_signed(word, result.x)) return false;
     if (!next_word(text, word) || !parse_signed(word, result.y)) return false;
@@ -264,6 +279,7 @@ bool parse_point(Span text, Point& result) {
 }
 
 bool parse_edge(Span text, Edge& result) {
+    // e 결과의 좌표 행은 x1 y1 x2 y2 네 정수여야 한다.
     Span word;
     if (!next_word(text, word) || !parse_signed(word, result.first.x)) return false;
     if (!next_word(text, word) || !parse_signed(word, result.first.y)) return false;
@@ -282,6 +298,7 @@ StoredLine store(const LineView& line) {
 }
 
 Index checked_index(std::size_t value, const char* description) {
+    // 자료구조의 Range가 32비트이므로, 잘못된 wraparound 전에 오류를 낸다.
     if (value > static_cast<std::size_t>(std::numeric_limits<Index>::max())) {
         throw std::length_error(std::string("RDB ") + description + " exceeds 32-bit range capacity");
     }
@@ -298,6 +315,7 @@ std::uint32_t checked_count(std::uint64_t value, const LineView& line, const cha
 class PropertyIdInterner {
 public:
     StringId intern(StringTable& strings, Span value) {
+        // 태그 ID(PP, CN 등)는 반복되므로 해시로 먼저 찾고, 충돌 시 실제 바이트를 비교한다.
         const std::uint64_t hash = hash_span(value);
         const std::pair<std::unordered_multimap<std::uint64_t, StringId>::iterator,
                         std::unordered_multimap<std::uint64_t, StringId>::iterator> range = ids_.equal_range(hash);
@@ -332,6 +350,7 @@ public:
         : reader_(path, options), options_(options) {}
 
     Database run() {
+        // 작은 초기 reserve는 일반 파일의 재할당을 줄이며, 실제 크기를 제한하지는 않는다.
         Database database;
         database.rule_checks.reserve(1024);
         database.strings.reserve(2048, 128U * 1024U);
@@ -342,6 +361,7 @@ public:
 
         LineView rule_name;
         while (next_nonblank(rule_name)) {
+            // 파일 끝까지 RuleCheck를 하나씩 읽어 같은 전역 Database에 추가한다.
             parse_rule(rule_name, database);
         }
         return database;
@@ -349,6 +369,7 @@ public:
 
 private:
     bool next_line(LineView& line) {
+        // pending_은 다음 경계를 미리 읽었을 때 사용한다. 없으면 실제 파일에서 읽는다.
         if (pending_.empty()) return reader_.next(line);
         active_ = pending_.front();
         pending_.pop_front();
@@ -372,6 +393,7 @@ private:
     }
 
     void push_rule_boundary(const StoredLine& rule_name, const StoredLine& rule_header) {
+        // deque 앞에 header를 먼저 넣어야, 다음 pop 시 name -> header 순서가 된다.
         pending_.push_front(rule_header);
         pending_.push_front(rule_name);
     }
@@ -381,6 +403,7 @@ private:
     }
 
     void parse_database_header(const LineView& line, Database& database) {
+        // 첫 줄의 마지막 단어를 DBU로 보고, 그 앞 전체를 Top cell 이름으로 보관한다.
         const Span text = trim(content(line));
         Span cursor = text;
         Span word;
@@ -400,6 +423,7 @@ private:
     }
 
     void parse_rule(const LineView& name_line, Database& database) {
+        // RuleCheck는 이름 줄, 헤더, check text, p/e 결과 순으로 구성된다.
         const Span name = trim(content(name_line));
         if (name.empty()) fail(name_line, "empty rule-check name");
 
@@ -427,8 +451,10 @@ private:
 
         const Index result_begin = checked_index(database.results.size(), "result begin");
         for (std::uint32_t i = 0; i < rule.current_result_count; ++i) {
+            // Result는 전역 배열에 좌표/태그를 채운 뒤, 마지막에 결과 레코드 자체를 넣는다.
             Result result = parse_result(database);
             if (i + 1U == rule.current_result_count) {
+                // 마지막 결과 뒤에는 다음 RuleCheck 또는 EOF가 올 수 있다.
                 consume_final_result_tail(database, result);
             } else {
                 consume_nonfinal_result_tail(database, result);
@@ -439,12 +465,14 @@ private:
                              checked_index(database.results.size() - result_begin, "result count"));
 
         if (rule.current_result_count == 0) {
+            // 결과가 없는 RuleCheck도 다음 RuleCheck 경계를 확인해야 한다.
             consume_empty_rule_boundary();
         }
         database.rule_checks.push_back(rule);
     }
 
     Result parse_result(Database& database) {
+        // p/e 선언 한 개와 그 앞쪽 태그, 좌표 블록을 읽는다.
         LineView signature_line;
         if (!next_nonblank(signature_line)) fail_at(reader_.position(), 0, "truncated result list");
         ResultSignature signature;
@@ -464,6 +492,7 @@ private:
 
         std::uint64_t coordinates_seen = 0;
         while (coordinates_seen < signature.geometry_count) {
+            // 좌표 사이에 태그가 끼어도 허용한다. 실제 좌표 수가 선언 값에 도달해야 끝난다.
             LineView line;
             if (!next_line(line)) fail_at(reader_.position(), signature_line.number, "truncated result geometry");
             const Span text = trim(content(line));
@@ -505,12 +534,14 @@ private:
     }
 
     void consume_nonfinal_result_tail(Database& database, Result& result) {
+        // 다음 p/e 선언 전까지의 태그는 현재 Result의 "좌표 뒤 태그"로 분류한다.
         const Index after_begin = checked_index(database.tagged_values.size(), "post-property begin");
         for (;;) {
             LineView line;
             if (!next_nonblank(line)) fail_at(reader_.position(), 0, "result count exceeds physical result list");
             ResultSignature next_result;
             if (parse_result_signature(trim(content(line)), next_result)) {
+                // 다음 결과의 선언을 미리 읽었으므로 pending_에 되돌려 다음 호출이 처리하게 한다.
                 push_front(store(line));
                 result.properties_after_geometry = Range(
                     after_begin, checked_index(database.tagged_values.size() - after_begin, "post-property count"));
@@ -524,6 +555,7 @@ private:
     }
 
     void consume_final_result_tail(Database& database, Result& result) {
+        // 마지막 결과는 다음 Result가 아닌 다음 RuleCheck를 만나야 경계가 끝난다.
         const Index after_begin = checked_index(database.tagged_values.size(), "post-property begin");
         for (;;) {
             LineView candidate_line;
@@ -552,6 +584,7 @@ private:
 
             RuleHeader possible_header;
             if (parse_rule_header(trim(content(possible_header_line)), possible_header)) {
+                // 후보 이름 + 헤더 조합이 확인되면 다음 RuleCheck용으로 두 줄을 되돌린다.
                 push_rule_boundary(candidate, store(possible_header_line));
                 result.properties_after_geometry = Range(
                     after_begin, checked_index(database.tagged_values.size() - after_begin, "post-property count"));
@@ -568,6 +601,7 @@ private:
     }
 
     void consume_empty_rule_boundary() {
+        // 결과가 0개인 경우에도 다음 이름/헤더를 미리 확인해 파일 구조 오류를 잡는다.
         LineView name_line;
         if (!next_nonblank(name_line)) return;
         const StoredLine name = store(name_line);
@@ -581,6 +615,7 @@ private:
     }
 
     void append_property(Database& database, Span text) {
+        // 첫 단어는 태그 ID, 나머지는 payload다. ID만 intern해 중복 저장을 줄인다.
         Span cursor = trim(text);
         Span id;
         if (!next_word(cursor, id)) return;
