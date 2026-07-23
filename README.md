@@ -112,13 +112,13 @@ coordinate parser when a nonstandard file must be structurally interpreted.
 
 ## Repository layout
 
-- `ascii_rdb.hpp` — compact public data model
-- `ascii_rdb_parser.hpp/.cpp` — full one-pass parser
-- `rdb_check_index.hpp` — fast name/offset/result-count indexer
-- `rdb_check_detail.hpp` — offset-based single-check detail parser
-- `rdb_check_geometry.hpp` — complete coordinate-only parser
-- `rdb_parser_tests.cpp` — executable test suite
-- `*_sample.rdb` — small and large synthetic fixtures
+- `Parser/ascii_rdb.hpp` — compact public data model
+- `Parser/ascii_rdb_parser.hpp/.cpp` — full one-pass parser
+- `Parser/rdb_check_index.hpp` — buffered `memchr(':')` fast name/offset/result-count indexer
+- `Parser/rdb_check_detail.hpp` — offset-based single-check detail parser
+- `Parser/rdb_check_geometry.hpp` — complete coordinate-only parser
+- `Parser/rdb_parser_tests.cpp` — executable test suite
+- `*_sample.rdb` — small and large synthetic fixtures used by the parser tests
 
 ## Known scope
 

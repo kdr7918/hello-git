@@ -391,6 +391,7 @@ inline bool parse_decimal_token(const char*& cursor, const char* end, std::uint6
 inline bool timestamp_colon(const char* begin, const char* colon, const char* end) {
     // 첫 번째 ':'만 통과한다. 두 번째 ':'에서는 colon[-2]가 ':'이므로 자동으로 탈락한다.
     if (colon - begin < 2 || end - colon < 6) return false;
+    if (colon - begin > 2 && !space(colon[-3])) return false;
     if (!decimal(colon[-2]) || !decimal(colon[-1]) ||
         !decimal(colon[1]) || !decimal(colon[2]) || colon[3] != ':' ||
         !decimal(colon[4]) || !decimal(colon[5])) {
@@ -408,19 +409,27 @@ inline bool timestamp_colon(const char* begin, const char* colon, const char* en
 inline bool make_check_index_entry(const char* buffer_begin,
                                    const char* buffer_end,
                                    const char* time_colon,
-                                   FileOffset buffer_offset,
+                                   CheckOffset buffer_offset,
+                                   bool buffer_starts_at_line_boundary,
                                    CheckIndexEntry& entry) {
     // 시간 줄의 시작을 찾는다. 이 줄은 "현재 수 원래 수 text 줄 수 날짜 시간" 헤더여야 한다.
     const char* header_begin = time_colon;
     while (header_begin != buffer_begin && header_begin[-1] != '\n') --header_begin;
-    if (header_begin == buffer_begin) return false; // 직전 Check Name 줄이 현재 버퍼에 없다.
+    if (header_begin == buffer_begin) {
+        if (buffer_offset != 0) {
+            throw ScanError(buffer_offset, "fast index context does not contain the previous Check name line");
+        }
+        return false; // 파일 첫 줄에는 직전 Check Name이 없다.
+    }
 
     // 헤더 바로 앞 줄이 Check Name이다. 버퍼 경계에서 잘린 이름은 오인식을 피하려고 건너뛴다.
     const char* name_end = header_begin - 1;
     if (name_end != buffer_begin && name_end[-1] == '\r') --name_end;
     const char* name_begin = name_end;
     while (name_begin != buffer_begin && name_begin[-1] != '\n') --name_begin;
-    if (name_begin == buffer_begin && buffer_offset != 0) return false;
+    if (name_begin == buffer_begin && buffer_offset != 0 && !buffer_starts_at_line_boundary) {
+        throw ScanError(buffer_offset, "fast index context starts inside a Check name line");
+    }
     const Span name = trim(Span(name_begin, name_end));
     if (name.empty()) return false;
 
@@ -437,7 +446,7 @@ inline bool make_check_index_entry(const char* buffer_begin,
     }
 
     entry.name.assign(name.begin, name.size());
-    entry.offset = buffer_offset + static_cast<FileOffset>(name_begin - buffer_begin);
+    entry.offset = buffer_offset + static_cast<CheckOffset>(name_begin - buffer_begin);
     entry.geometry_count = static_cast<std::uint32_t>(current);
     return true;
 }
@@ -451,7 +460,8 @@ public:
     HeaderPatternIndexReader(const std::string& path, const FastCheckIndexOptions& options)
         : fd_(-1),
           context_bytes_(options.context_bytes),
-          buffer_offset_(0) {
+          buffer_offset_(0),
+          buffer_starts_at_line_boundary_(true) {
         if (options.read_buffer_bytes == 0 || options.context_bytes < 64U) {
             throw std::invalid_argument("fast RDB index buffer/context size is too small");
         }
@@ -493,14 +503,35 @@ public:
 
             if (eof) break;
 
-            // 다음 버퍼의 첫 부분에 이전 데이터 context_bytes를 겹쳐 남긴다.
-            // 아직 검사하지 않은 마지막 7바이트 앞에도 Check Name/헤더가 남아 있어야 한다.
-            carried = total < context_bytes_ ? total : context_bytes_;
-            const std::size_t consumed = total - carried;
-            if (carried != 0) {
+            // 아직 검사하지 않은 tail이 속한 줄(보통 헤더)과 그 직전 Check Name 줄은
+            // context_bytes보다 길더라도 통째로 남긴다. 임의 바이트 경계에서 잘라 유효한
+            // Check를 누락시키지 않으며, 매우 긴 두 줄은 버퍼를 기하급수적으로 확장한다.
+            std::size_t current_line_start = scan_end;
+            while (current_line_start != 0 && buffer_[current_line_start - 1U] != '\n') {
+                --current_line_start;
+            }
+            std::size_t required_start = current_line_start;
+            if (required_start != 0) {
+                --required_start; // 현재 줄 앞의 '\n'
+                while (required_start != 0 && buffer_[required_start - 1U] != '\n') {
+                    --required_start;
+                }
+            }
+            const std::size_t context_start = total > context_bytes_ ? total - context_bytes_ : 0U;
+            const std::size_t consumed = context_start < required_start ? context_start : required_start;
+            carried = total - consumed;
+            const bool next_buffer_starts_at_line_boundary =
+                consumed == 0 || buffer_[consumed - 1U] == '\n';
+            if (consumed == 0 && carried == buffer_.size()) {
+                if (buffer_.size() > buffer_.max_size() / 2U) {
+                    throw std::length_error("fast RDB index context exceeds vector capacity");
+                }
+                buffer_.resize(buffer_.size() * 2U);
+            } else if (carried != 0 && consumed != 0) {
                 std::memmove(&buffer_[0], &buffer_[consumed], carried);
             }
-            buffer_offset_ += static_cast<FileOffset>(consumed);
+            buffer_offset_ += static_cast<CheckOffset>(consumed);
+            buffer_starts_at_line_boundary_ = next_buffer_starts_at_line_boundary;
             scan_begin = carried > lookahead_bytes ? carried - lookahead_bytes : 0U;
         }
         return checks;
@@ -531,7 +562,8 @@ private:
             const char* const colon = static_cast<const char*>(found);
             if (timestamp_colon(begin, colon, end)) {
                 CheckIndexEntry entry;
-                if (make_check_index_entry(begin, end, colon, buffer_offset_, entry)) {
+                if (make_check_index_entry(
+                        begin, end, colon, buffer_offset_, buffer_starts_at_line_boundary_, entry)) {
                     checks.push_back(entry);
                 }
             }
@@ -545,7 +577,8 @@ private:
     int fd_;
     std::vector<char> buffer_;
     std::size_t context_bytes_;
-    FileOffset buffer_offset_;
+    CheckOffset buffer_offset_;
+    bool buffer_starts_at_line_boundary_;
 };
 
 // 본문을 저장하지 않고 "규칙 이름 줄 + 규칙 헤더 줄" 조합을 찾는다.
