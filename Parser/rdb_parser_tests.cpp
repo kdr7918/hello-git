@@ -4,8 +4,11 @@
 #include "rdb_check_index.hpp"
 
 #include <cstdlib>
+#include <fcntl.h>
 #include <iostream>
+#include <stdexcept>
 #include <string>
+#include <unistd.h>
 
 namespace {
 
@@ -25,6 +28,38 @@ std::string sample_path(const char* name) {
 std::string text(const rdb::Database& database, rdb::StringId id) {
     return database.strings.get(id).str();
 }
+
+class TemporaryRdb {
+public:
+    explicit TemporaryRdb(const std::string& contents) {
+        char pattern[] = "/tmp/rdb-parser-test-XXXXXX";
+        const int fd = ::mkstemp(pattern);
+        if (fd < 0) throw std::runtime_error("mkstemp failed");
+        path_ = pattern;
+        std::size_t written = 0;
+        while (written < contents.size()) {
+            const ssize_t count = ::write(fd, contents.data() + written, contents.size() - written);
+            if (count <= 0) {
+                ::close(fd);
+                ::unlink(path_.c_str());
+                throw std::runtime_error("temporary RDB write failed");
+            }
+            written += static_cast<std::size_t>(count);
+        }
+        if (::close(fd) != 0) {
+            ::unlink(path_.c_str());
+            throw std::runtime_error("temporary RDB close failed");
+        }
+    }
+
+    ~TemporaryRdb() { ::unlink(path_.c_str()); }
+    const std::string& path() const { return path_; }
+
+private:
+    TemporaryRdb(const TemporaryRdb&);
+    TemporaryRdb& operator=(const TemporaryRdb&);
+    std::string path_;
+};
 
 const rdb::RuleCheck& rule(const rdb::Database& database, std::size_t index) {
     return database.rule_checks[index];
@@ -103,6 +138,37 @@ int main() {
     RDB_CHECK(small_buffer_index[2].offset == index[2].offset);
     RDB_CHECK(index_parser.parse_file(sample_path("large_standard_sample.rdb")).size() == 100);
     RDB_CHECK(index_parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb")).size() == 100);
+
+    // Check 이름 시작점이 read() overlap의 첫 바이트와 정확히 겹쳐도 누락되면 안 된다.
+    const std::string boundary_name(50, 'N');
+    const std::string boundary_contents =
+        std::string("TOP 1000\nPAD\n") + boundary_name + "\n7 7 0 Jul 21 12:10:49 2026\n";
+    const TemporaryRdb boundary_file(boundary_contents);
+    rdb::FastCheckIndexOptions boundary_options;
+    boundary_options.read_buffer_bytes = 71;
+    boundary_options.context_bytes = 64;
+    const std::vector<rdb::CheckIndexEntry> boundary_index =
+        index_parser.parse_file(boundary_file.path(), boundary_options);
+    RDB_CHECK(boundary_index.size() == 1);
+    RDB_CHECK(boundary_index[0].name == boundary_name);
+    RDB_CHECK(boundary_index[0].offset == 13);
+    RDB_CHECK(boundary_index[0].geometry_count == 7);
+
+    // 모든 작은 prefix 배치에서 Check 이름/시간이 read() 경계를 넘어도 정확히 한 번 검출한다.
+    for (std::size_t prefix_size = 8; prefix_size < 96; ++prefix_size) {
+        const std::string prefix(prefix_size, 'P');
+        const TemporaryRdb shifted_file(
+            prefix + "\n" + boundary_name + "\n7 7 0 Jul 21 12:10:49 2026\n");
+        const std::vector<rdb::CheckIndexEntry> shifted_index =
+            index_parser.parse_file(shifted_file.path(), boundary_options);
+        RDB_CHECK(shifted_index.size() == 1);
+        RDB_CHECK(shifted_index[0].offset == prefix_size + 1U);
+    }
+
+    // HH:MM:SS 앞에도 token 경계가 있어야 하며, 식별자 일부의 시간 모양은 제외한다.
+    const TemporaryRdb embedded_time_file(
+        "TOP 1000\nNOT_A_CHECK\n7 7 0 Jul 21 x12:10:49 2026\n");
+    RDB_CHECK(index_parser.parse_file(embedded_time_file.path()).empty());
 
     const rdb::CheckDetailParser detail_parser;
     const rdb::CheckDetail first_check =
