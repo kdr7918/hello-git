@@ -4,3 +4,5 @@
 /CMakeFiles/
 /Testing/
 *.user
+__pycache__/
+*.py[cod]
