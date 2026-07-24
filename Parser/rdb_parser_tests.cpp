@@ -137,16 +137,22 @@ int main() {
     static_assert(
         std::is_same<decltype(index_database.database_precision), double>::value,
         "fast index database precision must be double");
+    static_assert(
+        std::is_same<decltype(index_database.checks[0].comment), std::string>::value,
+        "fast index comment must be one std::string");
     RDB_CHECK(index_database.top_cell_name == "TOP_CHIP");
     RDB_CHECK(index_database.database_precision == 1000.0);
     RDB_CHECK(index_database.checks.size() == 3);
     RDB_CHECK(index_database.checks[0].name == "M1.SPACING.1");
-    RDB_CHECK(index_database.checks[0].comments.size() == 3);
-    RDB_CHECK(index_database.checks[0].comments[0] == "Rule File Pathname: ./demo.svrf");
-    RDB_CHECK(index_database.checks[0].comments[1] == "Rule File Title: Example DRC deck");
-    RDB_CHECK(index_database.checks[0].comments[2] == "M1 spacing must be at least 0.14 um.");
-    RDB_CHECK(index_database.checks[1].comments.size() == 2);
-    RDB_CHECK(index_database.checks[2].comments.size() == 1);
+    RDB_CHECK(index_database.checks[0].comment ==
+        "Rule File Pathname: ./demo.svrf\n"
+        "Rule File Title: Example DRC deck\n"
+        "M1 spacing must be at least 0.14 um.");
+    RDB_CHECK(index_database.checks[1].comment ==
+        "Rule File Pathname: ./demo.svrf\n"
+        "M2 density is below the required threshold.");
+    RDB_CHECK(index_database.checks[2].comment ==
+        "Example of a rule check with no remaining defects.");
 
     const std::vector<rdb::CheckIndexEntry> index =
         index_parser.parse_file(sample_path("standard_sample.rdb"));
@@ -154,7 +160,7 @@ int main() {
     RDB_CHECK(index[0].name == "M1.SPACING.1");
     RDB_CHECK(index[0].offset > 0);
     RDB_CHECK(index[0].geometry_count == 2);
-    RDB_CHECK(index[0].comments.size() == 3);
+    RDB_CHECK(index[0].comment == index_database.checks[0].comment);
     RDB_CHECK(index[1].geometry_count == 1);
     RDB_CHECK(index[2].geometry_count == 0);
 
@@ -281,6 +287,7 @@ int main() {
     RDB_CHECK(blank_header_index.top_cell_name == "TOP CELL BLOCK");
     RDB_CHECK(blank_header_index.database_precision == 1.25e-3);
     RDB_CHECK(blank_header_index.checks.size() == 1);
+    RDB_CHECK(blank_header_index.checks[0].comment.empty());
 
     // 시간 header 뒤부터 첫 p/e signature 전까지 선언된 comment 줄을 원문대로 보존한다.
     const TemporaryRdb comment_file(
@@ -289,10 +296,8 @@ int main() {
     const rdb::CheckIndexDatabase comment_index =
         index_parser.parse_database(comment_file.path());
     RDB_CHECK(comment_index.checks.size() == 1);
-    RDB_CHECK(comment_index.checks[0].comments.size() == 3);
-    RDB_CHECK(comment_index.checks[0].comments[0] == "first comment");
-    RDB_CHECK(comment_index.checks[0].comments[1].empty());
-    RDB_CHECK(comment_index.checks[0].comments[2] == "  third comment  ");
+    RDB_CHECK(comment_index.checks[0].comment ==
+        "first comment\n\n  third comment  ");
 
     // Comment 안의 가짜 이름/header 시간 패턴은 별도 Check로 인덱싱하지 않는다.
     const TemporaryRdb header_like_comment_file(
@@ -303,7 +308,8 @@ int main() {
         index_parser.parse_database(header_like_comment_file.path());
     RDB_CHECK(header_like_comment_index.checks.size() == 1);
     RDB_CHECK(header_like_comment_index.checks[0].name == "REAL.CHECK");
-    RDB_CHECK(header_like_comment_index.checks[0].comments.size() == 3);
+    RDB_CHECK(header_like_comment_index.checks[0].comment ==
+        "NOT.A.CHECK\n7 7 0 Jul 21 12:10:50 2026\nlast comment");
 
     // Comment가 pread block 경계를 넘고 마지막 LF가 없어도 전체 문자열을 보존한다.
     const std::string long_comment(10000, 'C');
@@ -313,8 +319,17 @@ int main() {
     const rdb::CheckIndexDatabase long_comment_index =
         index_parser.parse_database(long_comment_file.path());
     RDB_CHECK(long_comment_index.checks.size() == 1);
-    RDB_CHECK(long_comment_index.checks[0].comments.size() == 1);
-    RDB_CHECK(long_comment_index.checks[0].comments[0] == long_comment);
+    RDB_CHECK(long_comment_index.checks[0].comment == long_comment);
+
+    // 첫/마지막/all-blank comment 행도 하나의 문자열 안에서 newline으로 보존한다.
+    const TemporaryRdb boundary_blank_comment_file(
+        "TOP 0.001\nBOUNDARY.BLANK\n0 0 3 Jul 21 12:10:49 2026\n"
+        "\nmiddle\n\nALL.BLANK\n0 0 2 Jul 21 12:10:50 2026\n\n\n");
+    const rdb::CheckIndexDatabase boundary_blank_comment_index =
+        index_parser.parse_database(boundary_blank_comment_file.path());
+    RDB_CHECK(boundary_blank_comment_index.checks.size() == 2);
+    RDB_CHECK(boundary_blank_comment_index.checks[0].comment == "\nmiddle\n");
+    RDB_CHECK(boundary_blank_comment_index.checks[1].comment == "\n");
 
     // Header가 선언한 comment 줄 수보다 파일이 짧으면 조용히 누락시키지 않는다.
     const TemporaryRdb truncated_comment_file(

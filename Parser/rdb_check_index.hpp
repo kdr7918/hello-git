@@ -47,7 +47,7 @@ struct CheckIndexEntry {
     std::string name;
     CheckOffset offset;
     std::uint32_t geometry_count;
-    std::vector<std::string> comments;
+    std::string comment; // 여러 comment 줄을 '\n'으로 연결하며 마지막 '\n'은 붙이지 않는다.
 
     CheckIndexEntry() : offset(0), geometry_count(0) {}
 };
@@ -752,7 +752,10 @@ private:
                              std::size_t& lines_seen,
                              std::string& line) const {
         if (!line.empty() && line[line.size() - 1U] == '\r') line.resize(line.size() - 1U);
-        if (lines_seen != 0) entry.comments.push_back(line);
+        if (lines_seen != 0) {
+            if (lines_seen > 1U) entry.comment.push_back('\n');
+            entry.comment.append(line);
+        }
         line.clear();
         ++lines_seen;
         return lines_seen == expected_comments + 1U;
@@ -779,7 +782,7 @@ private:
         CheckIndexEntry& entry,
         const CheckCommentRequest& request,
         std::vector<char>& block) const {
-        if (request.comment_count > entry.comments.max_size() ||
+        if (request.comment_count > entry.comment.max_size() ||
             request.comment_count == std::numeric_limits<std::size_t>::max()) {
             throw ScanError(request.header_offset, "comment count exceeds platform capacity");
         }
