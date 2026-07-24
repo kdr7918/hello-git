@@ -10,14 +10,19 @@ import stat
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
-from typing import Iterable, TypedDict
+from typing import TypedDict
 
-DEFAULT_KEYWORDS = (
-    "-laypop_title SALT-Workbench",
-    "-batch",
-    "-python",
+SALT_KEYWORD = "-laypop_title SALT-Workbench"
+PYTHON_KEYWORD = "-python"
+BATCH_KEYWORD = "-batch"
+CATEGORY_LABELS = (
+    "SALT-Workbench 있음 / Python",
+    "SALT-Workbench 있음 / Batch",
+    "SALT-Workbench 있음 / 없음",
+    "SALT-Workbench 없음 / Python",
+    "SALT-Workbench 없음 / Batch",
+    "SALT-Workbench 없음 / 없음",
 )
-NO_KEYWORD_LABEL = "아무 키워드도 없음"
 
 
 class CategoryStatistics(TypedDict):
@@ -98,30 +103,23 @@ def analyze_logs(
     root: str | Path,
     start_date: str,
     end_date: str,
-    keywords: Iterable[str] = DEFAULT_KEYWORDS,
     top_limit: int = 10,
 ) -> dict[str, CategoryStatistics]:
-    """키워드별 전체 작업 수와 작업 수가 많은 상위 유저를 반환한다.
+    """SALT 사용 여부 × Python/Batch/없음의 6개 분석 결과를 반환한다.
 
     예상 경로는 ``root/서버명/YYYYMMDD/cmd_유저명_HHMMSS.log``이다.
-    날짜 범위는 양 끝을 포함한다. 한 로그가 여러 키워드를 포함하면 각
-    키워드에 한 건씩 집계하고, 어느 키워드도 없을 때만 별도 분류한다.
+    날짜 범위는 양 끝을 포함한다. Python과 Batch가 모두 있으면 같은
+    SALT 그룹의 Python과 Batch에 각각 한 건씩 집계한다.
     """
     start = parse_date(start_date)
     end = parse_date(end_date)
     if start > end:
         raise ValueError("시작일은 종료일보다 늦을 수 없습니다.")
 
-    keyword_list = list(keywords)
-    if len(keyword_list) != 3 or any(not keyword for keyword in keyword_list):
-        raise ValueError("비어 있지 않은 키워드를 정확히 3개 지정해야 합니다.")
-    if len(set(keyword_list)) != 3:
-        raise ValueError("키워드 3개는 서로 달라야 합니다.")
     if top_limit < 1:
         raise ValueError("상위 유저 수는 1 이상이어야 합니다.")
 
-    user_counts = {keyword: Counter() for keyword in keyword_list}
-    user_counts[NO_KEYWORD_LABEL] = Counter()
+    user_counts = {category: Counter() for category in CATEGORY_LABELS}
 
     root_path = Path(root)
     try:
@@ -159,13 +157,20 @@ def analyze_logs(
                             if fourth_line is None:
                                 continue
 
-                            matched = False
-                            for keyword in keyword_list:
-                                if keyword in fourth_line:
-                                    user_counts[keyword][user_name] += 1
-                                    matched = True
-                            if not matched:
-                                user_counts[NO_KEYWORD_LABEL][user_name] += 1
+                            salt_case = (
+                                "SALT-Workbench 있음"
+                                if SALT_KEYWORD in fourth_line
+                                else "SALT-Workbench 없음"
+                            )
+                            has_python = PYTHON_KEYWORD in fourth_line
+                            has_batch = BATCH_KEYWORD in fourth_line
+
+                            if has_python:
+                                user_counts[f"{salt_case} / Python"][user_name] += 1
+                            if has_batch:
+                                user_counts[f"{salt_case} / Batch"][user_name] += 1
+                            if not has_python and not has_batch:
+                                user_counts[f"{salt_case} / 없음"][user_name] += 1
                     finally:
                         os.close(date_fd)
             finally:
