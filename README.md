@@ -84,19 +84,22 @@ They avoid retaining data outside each component's declared output.
 #include "rdb_check_geometry.hpp"
 
 rdb::FastCheckIndexParser index_parser;
-std::vector<rdb::CheckIndexEntry> checks = index_parser.parse_file("result.rdb");
+rdb::CheckIndexDatabase index = index_parser.parse_database("result.rdb");
+// index.top_cell_name, index.database_precision, index.checks
 
 // 같은 RDB에서 여러 Check를 선택한다면 파일 매핑을 한 번 재사용한다.
 rdb::CheckDetailFile detail_file("result.rdb");
-rdb::CheckDetail selected = detail_file.parse_at(checks[0].offset);
+rdb::CheckDetail selected = detail_file.parse_at(index.checks[0].offset);
 
 rdb::CheckGeometryParser geometry_parser;
 rdb::GeometryDatabase geometry = geometry_parser.parse_file("result.rdb");
 ```
 
 - `FastCheckIndexParser` uses a sequential `read()` buffer and `memchr(':')`
-  to find `HH:MM:SS` rule headers.  It retains only the check name, byte
-  offset, and current `p/e` result count.  This is the fastest TreeView stage.
+  to parse the top-cell name/database precision and find `HH:MM:SS` rule
+  headers. `CheckIndexDatabase` retains those header fields plus each check
+  name, byte offset, and current `p/e` result count. This is the fastest
+  TreeView stage. The legacy `parse_file()` API still returns only the check list.
 - `CheckDetailParser` seeks to one indexed offset and parses that check's
   check text, tags, and geometry without loading the earlier checks.
   `CheckDetailFile` is the preferred reusable session for repeated selection.

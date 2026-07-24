@@ -46,6 +46,15 @@ struct CheckIndexEntry {
     CheckIndexEntry() : offset(0), geometry_count(0) {}
 };
 
+// 1단계 인덱싱 결과다. 파일 헤더와 TreeView용 Check 목록을 함께 반환한다.
+struct CheckIndexDatabase {
+    std::string top_cell_name;
+    std::int64_t database_precision;
+    std::vector<CheckIndexEntry> checks;
+
+    CheckIndexDatabase() : database_precision(0) {}
+};
+
 /*
  * 1단계 인덱서 전용 설정이다.
  * read_buffer_bytes는 시스템 호출 횟수와 캐시 사용량의 균형을 위한 값이다.
@@ -320,9 +329,11 @@ inline bool parse_edge(Span text, Edge& edge) {
            next_word(text, word) && parse_signed(word, edge.second.y) && trim(text).empty();
 }
 
-inline void validate_database_header(const Line& line) {
-    // 첫 줄의 마지막 단어가 양수 DBU인지 확인한다. Top cell 이름은 여기서 보관하지 않는다.
-    const Span text = trim(line.text);
+inline bool parse_database_header(Span value,
+                                  std::string& top_cell_name,
+                                  std::int64_t& database_precision) {
+    // 첫 nonblank 줄의 마지막 단어를 양수 DBU로, 앞부분을 Top cell 이름으로 해석한다.
+    const Span text = trim(value);
     Span cursor = text;
     Span word;
     Span last;
@@ -330,6 +341,20 @@ inline void validate_database_header(const Line& line) {
 
     std::int64_t precision = 0;
     if (last.empty() || last.begin == text.begin || !parse_signed(last, precision) || precision <= 0) {
+        return false;
+    }
+    const Span top_cell = trim(Span(text.begin, last.begin));
+    if (top_cell.empty()) return false;
+
+    top_cell_name.assign(top_cell.begin, top_cell.size());
+    database_precision = precision;
+    return true;
+}
+
+inline void validate_database_header(const Line& line) {
+    std::string top_cell_name;
+    std::int64_t database_precision = 0;
+    if (!parse_database_header(line.text, top_cell_name, database_precision)) {
         throw ScanError(line.offset, "expected '<top cell name> <database precision>'");
     }
 }
@@ -484,8 +509,9 @@ public:
         if (fd_ >= 0) ::close(fd_);
     }
 
-    std::vector<CheckIndexEntry> run() {
-        std::vector<CheckIndexEntry> checks;
+    CheckIndexDatabase run() {
+        CheckIndexDatabase database;
+        bool database_header_parsed = false;
         std::size_t carried = 0;
         std::size_t scan_begin = 0;
         const std::size_t lookahead_bytes = 7U; // HH:MM:SS 뒤 문자까지 확인할 수 있는 최소 여유
@@ -495,11 +521,17 @@ public:
             const bool eof = received == 0;
             const std::size_t total = carried + (received > 0 ? static_cast<std::size_t>(received) : 0U);
 
+            if (!database_header_parsed) {
+                database_header_parsed = try_parse_database_header(total, eof, database);
+            }
+
             // ':' 뒤에 HH:MM:SS가 모두 들어 있는 후보만 처리한다.
             // 버퍼 끝 7바이트는 다음 read 후 검사한다.
             const std::size_t scan_end = eof ? total :
                 (total > lookahead_bytes ? total - lookahead_bytes : 0U);
-            if (scan_begin < scan_end) scan_headers(total, scan_begin, scan_end, checks);
+            if (scan_begin < scan_end) {
+                scan_headers(total, scan_begin, scan_end, database.checks);
+            }
 
             if (eof) break;
 
@@ -534,10 +566,43 @@ public:
             buffer_starts_at_line_boundary_ = next_buffer_starts_at_line_boundary;
             scan_begin = carried > lookahead_bytes ? carried - lookahead_bytes : 0U;
         }
-        return checks;
+        return database;
     }
 
 private:
+    bool try_parse_database_header(std::size_t total_size,
+                                   bool eof,
+                                   CheckIndexDatabase& database) const {
+        const char* const begin = &buffer_[0];
+        const char* const end = begin + total_size;
+        const char* cursor = begin;
+
+        while (cursor != end) {
+            const void* const found =
+                std::memchr(cursor, '\n', static_cast<std::size_t>(end - cursor));
+            if (found == 0 && !eof) return false;
+
+            const char* const raw_end =
+                found == 0 ? end : static_cast<const char*>(found);
+            const Span line = trim(Span(cursor, raw_end));
+            if (!line.empty()) {
+                if (!parse_database_header(
+                        line, database.top_cell_name, database.database_precision)) {
+                    const CheckOffset offset = buffer_offset_ +
+                        static_cast<CheckOffset>(cursor - begin);
+                    throw ScanError(
+                        offset, "expected '<top cell name> <database precision>'");
+                }
+                return true;
+            }
+            if (found == 0) break;
+            cursor = raw_end + 1;
+        }
+
+        if (eof) throw ScanError(0, "empty RDB file");
+        return false;
+    }
+
     ssize_t read_block(char* destination, std::size_t capacity) {
         for (;;) {
             const ssize_t received = ::read(fd_, destination, capacity);
@@ -609,10 +674,17 @@ inline bool next_rule(LineCursor& cursor, Line& name_line, RuleHeader& header) {
  */
 class FastCheckIndexParser {
 public:
-    std::vector<CheckIndexEntry> parse_file(
+    CheckIndexDatabase parse_database(
         const std::string& path,
         const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
         return detail::HeaderPatternIndexReader(path, options).run();
+    }
+
+    // 기존 Check 목록 전용 API를 유지한다.
+    std::vector<CheckIndexEntry> parse_file(
+        const std::string& path,
+        const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
+        return parse_database(path, options).checks;
     }
 };
 

@@ -119,6 +119,13 @@ int main() {
     RDB_CHECK(large_post_geometry.edges.size() == 200);
 
     const rdb::FastCheckIndexParser index_parser;
+    const rdb::CheckIndexDatabase index_database =
+        index_parser.parse_database(sample_path("standard_sample.rdb"));
+    RDB_CHECK(index_database.top_cell_name == "TOP_CHIP");
+    RDB_CHECK(index_database.database_precision == 1000);
+    RDB_CHECK(index_database.checks.size() == 3);
+    RDB_CHECK(index_database.checks[0].name == "M1.SPACING.1");
+
     const std::vector<rdb::CheckIndexEntry> index =
         index_parser.parse_file(sample_path("standard_sample.rdb"));
     RDB_CHECK(index.size() == 3);
@@ -139,6 +146,37 @@ int main() {
     RDB_CHECK(index_parser.parse_file(sample_path("large_standard_sample.rdb")).size() == 100);
     RDB_CHECK(index_parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb")).size() == 100);
 
+    // Top-cell header가 read() 버퍼 경계를 넘어도 이름과 precision을 온전히 복원한다.
+    const std::string long_top_cell(180, 'T');
+    const TemporaryRdb long_header_file(
+        long_top_cell + " 2000\nLONG.HEADER.CHECK\n1 1 0 Jul 21 12:10:49 2026\n");
+    const rdb::CheckIndexDatabase long_header_index =
+        index_parser.parse_database(long_header_file.path(), small_index_options);
+    RDB_CHECK(long_header_index.top_cell_name == long_top_cell);
+    RDB_CHECK(long_header_index.database_precision == 2000);
+    RDB_CHECK(long_header_index.checks.size() == 1);
+
+    // Full parser와 동일하게 선행 blank 줄과 여러 단어 Top-cell 이름을 허용한다.
+    const TemporaryRdb blank_header_file(
+        "\n \r\nTOP CELL BLOCK 4096\r\nBLANK.HEADER.CHECK\r\n"
+        "1 1 0 Jul 21 12:10:49 2026\r\n");
+    const rdb::CheckIndexDatabase blank_header_index =
+        index_parser.parse_database(blank_header_file.path());
+    RDB_CHECK(blank_header_index.top_cell_name == "TOP CELL BLOCK");
+    RDB_CHECK(blank_header_index.database_precision == 4096);
+    RDB_CHECK(blank_header_index.checks.size() == 1);
+
+    // Top-cell/precision을 반환하는 API는 잘못된 첫 nonblank header를 거부한다.
+    const TemporaryRdb invalid_header_file(
+        "INVALID_HEADER\nCHECK\n1 1 0 Jul 21 12:10:49 2026\n");
+    bool invalid_header_rejected = false;
+    try {
+        index_parser.parse_database(invalid_header_file.path());
+    } catch (const rdb::ScanError&) {
+        invalid_header_rejected = true;
+    }
+    RDB_CHECK(invalid_header_rejected);
+
     // Check 이름 시작점이 read() overlap의 첫 바이트와 정확히 겹쳐도 누락되면 안 된다.
     const std::string boundary_name(50, 'N');
     const std::string boundary_contents =
@@ -158,11 +196,12 @@ int main() {
     for (std::size_t prefix_size = 8; prefix_size < 96; ++prefix_size) {
         const std::string prefix(prefix_size, 'P');
         const TemporaryRdb shifted_file(
-            prefix + "\n" + boundary_name + "\n7 7 0 Jul 21 12:10:49 2026\n");
+            "TOP 1000\n" + prefix + "\n" + boundary_name +
+            "\n7 7 0 Jul 21 12:10:49 2026\n");
         const std::vector<rdb::CheckIndexEntry> shifted_index =
             index_parser.parse_file(shifted_file.path(), boundary_options);
         RDB_CHECK(shifted_index.size() == 1);
-        RDB_CHECK(shifted_index[0].offset == prefix_size + 1U);
+        RDB_CHECK(shifted_index[0].offset == 9U + prefix_size + 1U);
     }
 
     // HH:MM:SS 앞에도 token 경계가 있어야 하며, 식별자 일부의 시간 모양은 제외한다.
