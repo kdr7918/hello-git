@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """로그 4번째 줄의 명령 옵션별 작업 수와 상위 사용자를 집계한다."""
 
-from __future__ import annotations
-
 import argparse
 import os
 import re
@@ -10,7 +8,7 @@ import stat
 from collections import Counter
 from datetime import date, datetime
 from pathlib import Path
-from typing import TypedDict
+from typing import Optional, Union
 
 SALT_KEYWORD = "-laypop_title SALT-Workbench"
 PYTHON_KEYWORD = "-python"
@@ -25,11 +23,6 @@ CATEGORY_LABELS = (
 )
 
 
-class CategoryStatistics(TypedDict):
-    total_jobs: int
-    top_users: list[tuple[str, int]]
-
-
 def parse_date(value: str) -> date:
     """YYYYMMDD 문자열을 비교 가능한 date로 변환한다."""
     if len(value) != 8 or not value.isdigit():
@@ -40,16 +33,17 @@ def parse_date(value: str) -> date:
         raise ValueError(f"유효하지 않은 날짜입니다: {value}") from exc
 
 
-def parse_log_filename(name: str) -> str | None:
-    """cmd_유저명_HHMMSS.log에서 유저명을 반환한다."""
-    match = re.fullmatch(r"cmd_(.+)_(\d{6})\.log", name)
+def parse_log_filename(name: str) -> Optional[str]:
+    """cmd_YYYYMMDD_HHMMSS_유저_PID.log에서 유저명을 반환한다."""
+    match = re.fullmatch(r"cmd_(\d{8})_(\d{6})_(.+)_(\d+)\.log", name)
     if match is None:
         return None
     try:
+        parse_date(match.group(1))
         datetime.strptime(match.group(2), "%H%M%S")
     except ValueError:
         return None
-    return match.group(1)
+    return match.group(3)
 
 
 def directory_open_flags() -> int:
@@ -61,12 +55,14 @@ def directory_open_flags() -> int:
     )
 
 
-def open_directory(path: str | Path, *, dir_fd: int | None = None) -> int:
+def open_directory(
+    path: Union[str, Path], *, dir_fd: Optional[int] = None
+) -> int:
     """심볼릭 링크를 따라가지 않고 디렉터리를 연다."""
     return os.open(path, directory_open_flags(), dir_fd=dir_fd)
 
 
-def read_fourth_line(dir_fd: int, name: str) -> str | None:
+def read_fourth_line(dir_fd: int, name: str) -> Optional[str]:
     """dir_fd 아래 일반 파일의 4번째 줄을 반환한다."""
     flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
     file_descriptor = os.open(name, flags, dir_fd=dir_fd)
@@ -91,7 +87,7 @@ def read_fourth_line(dir_fd: int, name: str) -> str | None:
             os.close(file_descriptor)
 
 
-def _open_child_directory(parent_fd: int, name: str) -> int | None:
+def _open_child_directory(parent_fd: int, name: str) -> Optional[int]:
     try:
         return open_directory(name, dir_fd=parent_fd)
     except OSError:
@@ -100,14 +96,15 @@ def _open_child_directory(parent_fd: int, name: str) -> int | None:
 
 
 def analyze_logs(
-    root: str | Path,
+    root: Union[str, Path],
     start_date: str,
     end_date: str,
     top_limit: int = 10,
-) -> dict[str, CategoryStatistics]:
+):
     """SALT 사용 여부 × Python/Batch/없음의 6개 분석 결과를 반환한다.
 
-    예상 경로는 ``root/서버명/YYYYMMDD/cmd_유저명_HHMMSS.log``이다.
+    예상 경로는
+    ``root/서버명/YYYYMMDD/cmd_YYYYMMDD_HHMMSS_유저_PID.log``이다.
     날짜 범위는 양 끝을 포함한다. Python과 Batch가 모두 있으면 같은
     SALT 그룹의 Python과 Batch에 각각 한 건씩 집계한다.
     """
@@ -178,7 +175,7 @@ def analyze_logs(
     finally:
         os.close(root_fd)
 
-    result: dict[str, CategoryStatistics] = {}
+    result = {}
     for category, counts in user_counts.items():
         top_users = sorted(counts.items(), key=lambda item: (-item[1], item[0]))[
             :top_limit

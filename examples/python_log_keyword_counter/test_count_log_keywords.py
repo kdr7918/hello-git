@@ -14,10 +14,10 @@ class AnalyzeLogsTests(unittest.TestCase):
     def tearDown(self):
         self.temp_dir.cleanup()
 
-    def write_log(self, server, date, user, time, fourth_line):
+    def write_log(self, server, date, user, time, fourth_line, pid="1234"):
         directory = self.root / server / date
         directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"cmd_{user}_{time}.log"
+        path = directory / f"cmd_{date}_{time}_{user}_{pid}.log"
         path.write_text(f"line 1\nline 2\nline 3\n{fourth_line}\n", encoding="utf-8")
         return path
 
@@ -75,7 +75,7 @@ class AnalyzeLogsTests(unittest.TestCase):
     def test_uses_only_fourth_line_and_inclusive_date_range(self):
         directory = self.root / "server-a" / "20260102"
         directory.mkdir(parents=True)
-        (directory / "cmd_kim_090000.log").write_text(
+        (directory / "cmd_20260102_090000_kim_1234.log").write_text(
             "-batch\n-python\n-laypop_title SALT-Workbench\nno match\n-batch\n",
             encoding="utf-8",
         )
@@ -113,17 +113,29 @@ class AnalyzeLogsTests(unittest.TestCase):
     def test_ignores_malformed_names_short_files_links_and_non_files(self):
         date_dir = self.root / "server-a" / "20260101"
         date_dir.mkdir(parents=True)
-        (date_dir / "cmd__090000.log").write_text("1\n2\n3\n-batch\n", encoding="utf-8")
-        (date_dir / "cmd_kim_250000.log").write_text("1\n2\n3\n-batch\n", encoding="utf-8")
-        (date_dir / "cmd_dir_110000.log").mkdir()
-        (date_dir / "cmd_short_120000.log").write_text("1\n2\n3\n", encoding="utf-8")
+        (date_dir / "cmd_20260101_090000__1234.log").write_text(
+            "1\n2\n3\n-batch\n", encoding="utf-8"
+        )
+        (date_dir / "cmd_20261301_090000_kim_1234.log").write_text(
+            "1\n2\n3\n-batch\n", encoding="utf-8"
+        )
+        (date_dir / "cmd_20260101_250000_kim_1234.log").write_text(
+            "1\n2\n3\n-batch\n", encoding="utf-8"
+        )
+        (date_dir / "cmd_20260101_090000_kim_not-pid.log").write_text(
+            "1\n2\n3\n-batch\n", encoding="utf-8"
+        )
+        (date_dir / "cmd_20260101_110000_dir_1234.log").mkdir()
+        (date_dir / "cmd_20260101_120000_short_1234.log").write_text(
+            "1\n2\n3\n", encoding="utf-8"
+        )
 
         outside = self.root.parent / f"{self.root.name}-outside"
         outside.mkdir()
         self.addCleanup(shutil.rmtree, outside, True)
-        outside_log = outside / "cmd_link_130000.log"
+        outside_log = outside / "cmd_20260101_130000_link_1234.log"
         outside_log.write_text("1\n2\n3\n-batch\n", encoding="utf-8")
-        (date_dir / "cmd_link_130000.log").symlink_to(outside_log)
+        (date_dir / "cmd_20260101_130000_link_1234.log").symlink_to(outside_log)
         (self.root / "linked-server").symlink_to(outside, target_is_directory=True)
         (self.root / "server-b").mkdir()
         (self.root / "server-b" / "20260101").symlink_to(outside, target_is_directory=True)
@@ -134,6 +146,16 @@ class AnalyzeLogsTests(unittest.TestCase):
         for category in CATEGORY_LABELS:
             self.assertEqual(result[category]["total_jobs"], 0)
             self.assertEqual(result[category]["top_users"], [])
+
+    def test_source_uses_only_python_3_6_compatible_typing_syntax(self):
+        source = (Path(__file__).parent / "count_log_keywords.py").read_text(
+            encoding="utf-8"
+        )
+
+        self.assertNotIn("from __future__ import annotations", source)
+        self.assertNotIn("TypedDict", source)
+        self.assertNotRegex(source, r"\b(?:str|int|Path) \| ")
+        self.assertNotRegex(source, r"\b(?:list|dict|tuple|set)\[")
 
     def test_validates_root_dates_and_top_limit(self):
         with self.assertRaisesRegex(FileNotFoundError, "기준 폴더"):
