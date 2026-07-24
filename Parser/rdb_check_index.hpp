@@ -4,11 +4,14 @@
 #include "ascii_rdb.hpp"
 
 #include <cerrno>
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <stdexcept>
 #include <string>
 #include <sys/mman.h>
@@ -49,10 +52,10 @@ struct CheckIndexEntry {
 // 1단계 인덱싱 결과다. 파일 헤더와 TreeView용 Check 목록을 함께 반환한다.
 struct CheckIndexDatabase {
     std::string top_cell_name;
-    std::int64_t database_precision;
+    double database_precision;
     std::vector<CheckIndexEntry> checks;
 
-    CheckIndexDatabase() : database_precision(0) {}
+    CheckIndexDatabase() : database_precision(0.0) {}
 };
 
 /*
@@ -140,6 +143,17 @@ inline bool parse_signed(Span value, std::int64_t& result) {
         if (negative) result = -result;
     }
     return true;
+}
+
+inline bool parse_double(Span value, double& result) {
+    // Header에서 한 번만 호출되는 경로다. classic locale로 소수점과 지수 표기를
+    // 안정적으로 지원하고 NaN/Inf 및 뒤에 남는 문자는 거부한다.
+    if (value.empty()) return false;
+    const std::string token(value.begin, value.size());
+    std::istringstream input(token);
+    input.imbue(std::locale::classic());
+    input >> std::noskipws >> result;
+    return input && input.peek() == std::char_traits<char>::eof() && std::isfinite(result);
 }
 
 struct Line {
@@ -331,7 +345,7 @@ inline bool parse_edge(Span text, Edge& edge) {
 
 inline bool parse_database_header(Span value,
                                   std::string& top_cell_name,
-                                  std::int64_t& database_precision) {
+                                  double& database_precision) {
     // 첫 nonblank 줄의 마지막 단어를 양수 DBU로, 앞부분을 Top cell 이름으로 해석한다.
     const Span text = trim(value);
     Span cursor = text;
@@ -339,8 +353,8 @@ inline bool parse_database_header(Span value,
     Span last;
     while (next_word(cursor, word)) last = word;
 
-    std::int64_t precision = 0;
-    if (last.empty() || last.begin == text.begin || !parse_signed(last, precision) || precision <= 0) {
+    double precision = 0.0;
+    if (last.empty() || last.begin == text.begin || !parse_double(last, precision) || precision <= 0.0) {
         return false;
     }
     const Span top_cell = trim(Span(text.begin, last.begin));
@@ -353,7 +367,7 @@ inline bool parse_database_header(Span value,
 
 inline void validate_database_header(const Line& line) {
     std::string top_cell_name;
-    std::int64_t database_precision = 0;
+    double database_precision = 0.0;
     if (!parse_database_header(line.text, top_cell_name, database_precision)) {
         throw ScanError(line.offset, "expected '<top cell name> <database precision>'");
     }
