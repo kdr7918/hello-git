@@ -9,6 +9,7 @@
 #include <cstdint>
 #include <cstring>
 #include <fcntl.h>
+#include <functional>
 #include <limits>
 #include <locale>
 #include <sstream>
@@ -17,6 +18,7 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace rdb {
@@ -39,12 +41,13 @@ private:
     CheckOffset offset_;
 };
 
-// TreeView의 한 행에 바로 사용할 수 있는 최소 정보다.
+// TreeView의 한 행에 바로 사용할 수 있는 정보와 header 뒤 comment를 보관한다.
 // geometry_count는 좌표 점 개수가 아니라 p/e 결과(결함 도형) 레코드 개수다.
 struct CheckIndexEntry {
     std::string name;
     CheckOffset offset;
     std::uint32_t geometry_count;
+    std::vector<std::string> comments;
 
     CheckIndexEntry() : offset(0), geometry_count(0) {}
 };
@@ -62,17 +65,67 @@ struct CheckIndexDatabase {
  * 1단계 인덱서 전용 설정이다.
  * read_buffer_bytes는 시스템 호출 횟수와 캐시 사용량의 균형을 위한 값이다.
  * context_bytes는 버퍼 경계에서 바로 앞 Check Name 줄까지 다시 볼 수 있게 남겨 둔다.
+ * progress_callback은 중복 없는 단조 증가 정수(0~100)를 전달하며, 100은 완료 후에만 전달한다.
  */
+typedef std::function<void(int)> FastCheckIndexProgressCallback;
+
 struct FastCheckIndexOptions {
     std::size_t read_buffer_bytes;
     std::size_t context_bytes;
+    FastCheckIndexProgressCallback progress_callback;
 
     FastCheckIndexOptions()
         : read_buffer_bytes(16U * 1024U * 1024U),
-          context_bytes(64U * 1024U) {}
+          context_bytes(64U * 1024U),
+          progress_callback() {}
 };
 
 namespace detail {
+
+struct FileState {
+    dev_t device;
+    ino_t inode;
+    off_t size;
+    time_t modified_seconds;
+    long modified_nanoseconds;
+    time_t changed_seconds;
+    long changed_nanoseconds;
+};
+
+inline FileState capture_file_state(int fd) {
+    struct stat status;
+    if (::fstat(fd, &status) != 0) {
+        throw std::runtime_error(
+            "cannot stat RDB file: " + std::string(std::strerror(errno)));
+    }
+
+    FileState state;
+    state.device = status.st_dev;
+    state.inode = status.st_ino;
+    state.size = status.st_size;
+#if defined(__APPLE__)
+    state.modified_seconds = status.st_mtimespec.tv_sec;
+    state.modified_nanoseconds = status.st_mtimespec.tv_nsec;
+    state.changed_seconds = status.st_ctimespec.tv_sec;
+    state.changed_nanoseconds = status.st_ctimespec.tv_nsec;
+#else
+    state.modified_seconds = status.st_mtim.tv_sec;
+    state.modified_nanoseconds = status.st_mtim.tv_nsec;
+    state.changed_seconds = status.st_ctim.tv_sec;
+    state.changed_nanoseconds = status.st_ctim.tv_nsec;
+#endif
+    return state;
+}
+
+inline bool same_file_state(const FileState& left, const FileState& right) {
+    return left.device == right.device &&
+           left.inode == right.inode &&
+           left.size == right.size &&
+           left.modified_seconds == right.modified_seconds &&
+           left.modified_nanoseconds == right.modified_nanoseconds &&
+           left.changed_seconds == right.changed_seconds &&
+           left.changed_nanoseconds == right.changed_nanoseconds;
+}
 
 // 파일 버퍼를 복사하지 않고 [begin, end) 포인터 두 개로 표현한 문자열 조각이다.
 // 대형 파일에서 std::string을 매 줄마다 만들지 않기 위해 사용한다.
@@ -445,12 +498,25 @@ inline bool timestamp_colon(const char* begin, const char* colon, const char* en
     return hour < 24 && minute < 60 && second < 60;
 }
 
+struct CheckCommentRequest {
+    std::size_t check_index;
+    CheckOffset header_offset;
+    std::uint64_t comment_count;
+
+    CheckCommentRequest(std::size_t index,
+                        CheckOffset offset,
+                        std::uint64_t count)
+        : check_index(index), header_offset(offset), comment_count(count) {}
+};
+
 inline bool make_check_index_entry(const char* buffer_begin,
                                    const char* buffer_end,
                                    const char* time_colon,
                                    CheckOffset buffer_offset,
                                    bool buffer_starts_at_line_boundary,
-                                   CheckIndexEntry& entry) {
+                                   CheckIndexEntry& entry,
+                                   CheckOffset& header_offset,
+                                   std::uint64_t& comment_count) {
     // 시간 줄의 시작을 찾는다. 이 줄은 "현재 수 원래 수 text 줄 수 날짜 시간" 헤더여야 한다.
     const char* header_begin = time_colon;
     while (header_begin != buffer_begin && header_begin[-1] != '\n') --header_begin;
@@ -487,6 +553,8 @@ inline bool make_check_index_entry(const char* buffer_begin,
     entry.name.assign(name.begin, name.size());
     entry.offset = buffer_offset + static_cast<CheckOffset>(name_begin - buffer_begin);
     entry.geometry_count = static_cast<std::uint32_t>(current);
+    header_offset = buffer_offset + static_cast<CheckOffset>(header_begin - buffer_begin);
+    comment_count = text_lines;
     return true;
 }
 
@@ -498,6 +566,9 @@ class HeaderPatternIndexReader {
 public:
     HeaderPatternIndexReader(const std::string& path, const FastCheckIndexOptions& options)
         : fd_(-1),
+          initial_state_(),
+          progress_callback_(options.progress_callback),
+          last_progress_(-1),
           context_bytes_(options.context_bytes),
           buffer_offset_(0),
           buffer_starts_at_line_boundary_(true) {
@@ -513,6 +584,13 @@ public:
         if (fd_ < 0) {
             throw std::runtime_error("cannot open RDB file '" + path + "': " + std::strerror(errno));
         }
+        try {
+            initial_state_ = capture_file_state(fd_);
+        } catch (...) {
+            ::close(fd_);
+            fd_ = -1;
+            throw;
+        }
 #ifdef POSIX_FADV_SEQUENTIAL
         // 인덱스는 첫 바이트부터 한 번만 읽으므로 커널 readahead에 순차 접근을 알려 준다.
         (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
@@ -524,7 +602,10 @@ public:
     }
 
     CheckIndexDatabase run() {
+        report_progress(0);
         CheckIndexDatabase database;
+        std::vector<CheckCommentRequest> comment_requests;
+        CheckOffset bytes_scanned = 0;
         bool database_header_parsed = false;
         std::size_t carried = 0;
         std::size_t scan_begin = 0;
@@ -534,6 +615,10 @@ public:
             const ssize_t received = read_block(&buffer_[carried], buffer_.size() - carried);
             const bool eof = received == 0;
             const std::size_t total = carried + (received > 0 ? static_cast<std::size_t>(received) : 0U);
+            if (received > 0) {
+                bytes_scanned += static_cast<CheckOffset>(received);
+                report_scan_progress(bytes_scanned);
+            }
 
             if (!database_header_parsed) {
                 database_header_parsed = try_parse_database_header(total, eof, database);
@@ -544,7 +629,8 @@ public:
             const std::size_t scan_end = eof ? total :
                 (total > lookahead_bytes ? total - lookahead_bytes : 0U);
             if (scan_begin < scan_end) {
-                scan_headers(total, scan_begin, scan_end, database.checks);
+                scan_headers(
+                    total, scan_begin, scan_end, database.checks, comment_requests);
             }
 
             if (eof) break;
@@ -580,10 +666,54 @@ public:
             buffer_starts_at_line_boundary_ = next_buffer_starts_at_line_boundary;
             scan_begin = carried > lookahead_bytes ? carried - lookahead_bytes : 0U;
         }
+        verify_file_unchanged();
+        report_progress(90);
+        populate_comments(database, comment_requests);
+        verify_file_unchanged();
+        report_progress(100);
         return database;
     }
 
 private:
+    void report_progress(int value) const {
+        if (!progress_callback_) return;
+        if (value < 0) value = 0;
+        if (value > 100) value = 100;
+        if (value <= last_progress_) return;
+        last_progress_ = value;
+        progress_callback_(value);
+    }
+
+    void report_scan_progress(CheckOffset bytes_scanned) const {
+        if (!progress_callback_ || initial_state_.size <= 0) return;
+        const CheckOffset file_size = static_cast<CheckOffset>(initial_state_.size);
+        if (bytes_scanned >= file_size) {
+            report_progress(90);
+            return;
+        }
+        const long double ratio = static_cast<long double>(bytes_scanned) /
+            static_cast<long double>(file_size);
+        report_progress(static_cast<int>(ratio * 90.0L));
+    }
+
+    void report_comment_progress(std::size_t completed, std::size_t total) const {
+        if (!progress_callback_ || total == 0) return;
+        if (completed >= total) {
+            report_progress(99);
+            return;
+        }
+        const long double ratio = static_cast<long double>(completed) /
+            static_cast<long double>(total);
+        report_progress(90 + static_cast<int>(ratio * 9.0L));
+    }
+
+    void verify_file_unchanged() const {
+        const FileState current_state = capture_file_state(fd_);
+        if (!same_file_state(initial_state_, current_state)) {
+            throw ScanError(0, "RDB file changed while fast indexing");
+        }
+    }
+
     bool try_parse_database_header(std::size_t total_size,
                                    bool eof,
                                    CheckIndexDatabase& database) const {
@@ -617,6 +747,99 @@ private:
         return false;
     }
 
+    bool finish_comment_line(CheckIndexEntry& entry,
+                             std::size_t expected_comments,
+                             std::size_t& lines_seen,
+                             std::string& line) const {
+        if (!line.empty() && line[line.size() - 1U] == '\r') line.resize(line.size() - 1U);
+        if (lines_seen != 0) entry.comments.push_back(line);
+        line.clear();
+        ++lines_seen;
+        return lines_seen == expected_comments + 1U;
+    }
+
+    ssize_t pread_block(char* destination,
+                        std::size_t capacity,
+                        CheckOffset offset) const {
+        if (offset > static_cast<CheckOffset>(std::numeric_limits<off_t>::max())) {
+            throw ScanError(offset, "comment offset exceeds platform file range");
+        }
+        for (;;) {
+            const ssize_t received =
+                ::pread(fd_, destination, capacity, static_cast<off_t>(offset));
+            if (received >= 0) return received;
+            if (errno != EINTR) {
+                throw std::runtime_error(
+                    "cannot read RDB comments: " + std::string(std::strerror(errno)));
+            }
+        }
+    }
+
+    CheckOffset populate_entry_comments(
+        CheckIndexEntry& entry,
+        const CheckCommentRequest& request,
+        std::vector<char>& block) const {
+        if (request.comment_count > entry.comments.max_size() ||
+            request.comment_count == std::numeric_limits<std::size_t>::max()) {
+            throw ScanError(request.header_offset, "comment count exceeds platform capacity");
+        }
+
+        const std::size_t expected_comments =
+            static_cast<std::size_t>(request.comment_count);
+        std::size_t lines_seen = 0;
+        CheckOffset offset = request.header_offset;
+        std::string line;
+
+        for (;;) {
+            const ssize_t received = pread_block(&block[0], block.size(), offset);
+            if (received == 0) {
+                if (!line.empty() &&
+                    finish_comment_line(entry, expected_comments, lines_seen, line)) {
+                    return offset;
+                }
+                throw ScanError(offset, "truncated check comments");
+            }
+
+            const std::size_t size = static_cast<std::size_t>(received);
+            for (std::size_t i = 0; i < size; ++i) {
+                const char value = block[i];
+                if (value == '\n') {
+                    if (finish_comment_line(
+                            entry, expected_comments, lines_seen, line)) {
+                        return offset + static_cast<CheckOffset>(i + 1U);
+                    }
+                } else {
+                    line.push_back(value);
+                }
+            }
+            offset += static_cast<CheckOffset>(size);
+        }
+    }
+
+    void populate_comments(CheckIndexDatabase& database,
+                           const std::vector<CheckCommentRequest>& requests) const {
+        std::vector<char> block(4U * 1024U);
+        std::vector<CheckIndexEntry> filtered_checks;
+        filtered_checks.reserve(database.checks.size());
+        CheckOffset comments_end = 0;
+
+        for (std::size_t request_index = 0; request_index < requests.size(); ++request_index) {
+            const CheckCommentRequest& request = requests[request_index];
+            CheckIndexEntry& raw_entry = database.checks[request.check_index];
+            if (raw_entry.offset < comments_end) {
+                // Comment 안에 우연히 나온 "이름 + 숫자 3개 + HH:MM:SS" 패턴이다.
+                report_comment_progress(request_index + 1U, requests.size());
+                continue;
+            }
+
+            CheckIndexEntry entry = std::move(raw_entry);
+            comments_end = populate_entry_comments(entry, request, block);
+            filtered_checks.push_back(std::move(entry));
+            report_comment_progress(request_index + 1U, requests.size());
+        }
+        database.checks.swap(filtered_checks);
+    }
+
     ssize_t read_block(char* destination, std::size_t capacity) {
         for (;;) {
             const ssize_t received = ::read(fd_, destination, capacity);
@@ -630,7 +853,8 @@ private:
     void scan_headers(std::size_t total_size,
                       std::size_t scan_begin,
                       std::size_t scan_end_size,
-                      std::vector<CheckIndexEntry>& checks) const {
+                      std::vector<CheckIndexEntry>& checks,
+                      std::vector<CheckCommentRequest>& comment_requests) const {
         const char* const begin = &buffer_[0];
         const char* const end = begin + total_size;
         const char* cursor = begin + scan_begin;
@@ -641,9 +865,14 @@ private:
             const char* const colon = static_cast<const char*>(found);
             if (timestamp_colon(begin, colon, end)) {
                 CheckIndexEntry entry;
+                CheckOffset header_offset = 0;
+                std::uint64_t comment_count = 0;
                 if (make_check_index_entry(
-                        begin, end, colon, buffer_offset_, buffer_starts_at_line_boundary_, entry)) {
+                        begin, end, colon, buffer_offset_, buffer_starts_at_line_boundary_,
+                        entry, header_offset, comment_count)) {
                     checks.push_back(entry);
+                    comment_requests.push_back(CheckCommentRequest(
+                        checks.size() - 1U, header_offset, comment_count));
                 }
             }
             cursor = colon + 1;
@@ -654,6 +883,9 @@ private:
     HeaderPatternIndexReader& operator=(const HeaderPatternIndexReader&);
 
     int fd_;
+    FileState initial_state_;
+    FastCheckIndexProgressCallback progress_callback_;
+    mutable int last_progress_;
     std::vector<char> buffer_;
     std::size_t context_bytes_;
     CheckOffset buffer_offset_;
@@ -683,7 +915,8 @@ inline bool next_rule(LineCursor& cursor, Line& name_line, RuleHeader& header) {
  * 1단계용 최고속 스캐너다.
  *
  * read() 버퍼에서 HH:MM:SS의 첫 ':'만 찾고, 그 줄의 처음 세 숫자를 검증한다.
- * 따라서 좌표, 태그, check text, p/e 선언을 전혀 해석하지 않는다.
+ * 좌표, 태그, p/e 선언은 해석하지 않지만 header의 text-line count만큼
+ * comment를 원문 문자열로 수집한다.
  * 이 경로는 표준적인 "숫자 3개 + 날짜 + HH:MM:SS" RuleCheck 헤더를 전제한다.
  */
 class FastCheckIndexParser {

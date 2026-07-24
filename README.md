@@ -84,10 +84,15 @@ They avoid retaining data outside each component's declared output.
 #include "rdb_check_geometry.hpp"
 
 rdb::FastCheckIndexParser index_parser;
-rdb::CheckIndexDatabase index = index_parser.parse_database("result.rdb");
+rdb::FastCheckIndexOptions index_options;
+index_options.progress_callback = [](int progress) {
+    // progress is monotonic and in [0, 100]. 100 means parsing is complete.
+};
+rdb::CheckIndexDatabase index =
+    index_parser.parse_database("result.rdb", index_options);
 std::string top_cell = index.top_cell_name;
 double precision = index.database_precision;
-// index.checks
+// index.checks[i].name / offset / geometry_count / comments
 
 // 같은 RDB에서 여러 Check를 선택한다면 파일 매핑을 한 번 재사용한다.
 rdb::CheckDetailFile detail_file("result.rdb");
@@ -100,7 +105,14 @@ rdb::GeometryDatabase geometry = geometry_parser.parse_file("result.rdb");
 - `FastCheckIndexParser` uses a sequential `read()` buffer and `memchr(':')`
   to parse the top-cell name/database precision and find `HH:MM:SS` rule
   headers. `CheckIndexDatabase` retains those header fields plus each check
-  name, byte offset, and current `p/e` result count. Database precision is a
+  name, byte offset, current `p/e` result count, and the declared comment lines
+  between the time header and the first `p/e` signature. Blank comments and
+  surrounding spaces are preserved; CRLF is normalized by removing `\r`.
+  `FastCheckIndexOptions::progress_callback` receives strictly increasing
+  integer progress values from `0` through `100`; callback exceptions stop the
+  parse, and `100` is emitted only after comment collection and file-consistency
+  verification complete.
+  Database precision is a
   finite positive `double`; decimal and scientific notation use the classic C
   locale. This is the fastest TreeView stage. The legacy `parse_file()` API
   still returns only the check list.

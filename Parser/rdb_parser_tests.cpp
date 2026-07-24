@@ -120,6 +120,18 @@ int main() {
     RDB_CHECK(large_post_geometry.edges.size() == 200);
 
     const rdb::FastCheckIndexParser index_parser;
+
+    // 1차 scan과 comment pread 사이의 동일-size 파일 변경도 감지해야 한다.
+    const TemporaryRdb file_state_fixture("TOP 0.001\n");
+    const int state_fd = ::open(file_state_fixture.path().c_str(), O_RDWR | O_CLOEXEC);
+    RDB_CHECK(state_fd >= 0);
+    const rdb::detail::FileState state_before = rdb::detail::capture_file_state(state_fd);
+    RDB_CHECK(::pwrite(state_fd, "X", 1, 0) == 1);
+    RDB_CHECK(::fsync(state_fd) == 0);
+    const rdb::detail::FileState state_after = rdb::detail::capture_file_state(state_fd);
+    RDB_CHECK(!rdb::detail::same_file_state(state_before, state_after));
+    RDB_CHECK(::close(state_fd) == 0);
+
     const rdb::CheckIndexDatabase index_database =
         index_parser.parse_database(sample_path("standard_sample.rdb"));
     static_assert(
@@ -129,6 +141,12 @@ int main() {
     RDB_CHECK(index_database.database_precision == 1000.0);
     RDB_CHECK(index_database.checks.size() == 3);
     RDB_CHECK(index_database.checks[0].name == "M1.SPACING.1");
+    RDB_CHECK(index_database.checks[0].comments.size() == 3);
+    RDB_CHECK(index_database.checks[0].comments[0] == "Rule File Pathname: ./demo.svrf");
+    RDB_CHECK(index_database.checks[0].comments[1] == "Rule File Title: Example DRC deck");
+    RDB_CHECK(index_database.checks[0].comments[2] == "M1 spacing must be at least 0.14 um.");
+    RDB_CHECK(index_database.checks[1].comments.size() == 2);
+    RDB_CHECK(index_database.checks[2].comments.size() == 1);
 
     const std::vector<rdb::CheckIndexEntry> index =
         index_parser.parse_file(sample_path("standard_sample.rdb"));
@@ -136,8 +154,102 @@ int main() {
     RDB_CHECK(index[0].name == "M1.SPACING.1");
     RDB_CHECK(index[0].offset > 0);
     RDB_CHECK(index[0].geometry_count == 2);
+    RDB_CHECK(index[0].comments.size() == 3);
     RDB_CHECK(index[1].geometry_count == 1);
     RDB_CHECK(index[2].geometry_count == 0);
+
+    // Fast parser는 전체 scan/comment 보강 진행률을 0~100 범위로 단조 증가시킨다.
+    rdb::FastCheckIndexOptions progress_options;
+    progress_options.read_buffer_bytes = 71;
+    progress_options.context_bytes = 64;
+    std::vector<int> progress_values;
+    progress_options.progress_callback = [&progress_values](int value) {
+        progress_values.push_back(value);
+    };
+    const rdb::CheckIndexDatabase progress_index = index_parser.parse_database(
+        sample_path("large_standard_sample.rdb"), progress_options);
+    RDB_CHECK(progress_index.checks.size() == 100);
+    RDB_CHECK(progress_values.size() > 3);
+    RDB_CHECK(progress_values.front() == 0);
+    RDB_CHECK(progress_values.back() == 100);
+    for (std::size_t i = 0; i < progress_values.size(); ++i) {
+        RDB_CHECK(progress_values[i] >= 0);
+        RDB_CHECK(progress_values[i] <= 100);
+        if (i != 0) RDB_CHECK(progress_values[i - 1] < progress_values[i]);
+    }
+
+    // 90 callback에서 동일-size 변경이 생기면 100을 보내지 않고 거부한다.
+    const TemporaryRdb changing_file(
+        "TOP 0.001\nCHANGING.CHECK\n0 0 1 Jul 21 12:10:49 2026\ncomment\n");
+    const int changing_fd = ::open(changing_file.path().c_str(), O_RDWR | O_CLOEXEC);
+    RDB_CHECK(changing_fd >= 0);
+    std::vector<int> changing_progress;
+    rdb::FastCheckIndexOptions changing_options;
+    changing_options.progress_callback = [&changing_progress, changing_fd](int value) {
+        changing_progress.push_back(value);
+        if (value == 90) {
+            if (::pwrite(changing_fd, "X", 1, 0) != 1 || ::fsync(changing_fd) != 0) {
+                throw std::runtime_error("cannot mutate progress test file");
+            }
+        }
+    };
+    bool changing_file_rejected = false;
+    try {
+        index_parser.parse_database(changing_file.path(), changing_options);
+    } catch (const rdb::ScanError&) {
+        changing_file_rejected = true;
+    }
+    RDB_CHECK(changing_file_rejected);
+    RDB_CHECK(!changing_progress.empty());
+    RDB_CHECK(changing_progress.back() != 100);
+    RDB_CHECK(::close(changing_fd) == 0);
+
+    // Callback 예외는 삼키지 않고 호출자에게 그대로 전달하며 100을 보내지 않는다.
+    struct ProgressAbort {};
+    std::vector<int> abort_progress;
+    rdb::FastCheckIndexOptions abort_options;
+    abort_options.progress_callback = [&abort_progress](int value) {
+        abort_progress.push_back(value);
+        if (value >= 90) throw ProgressAbort();
+    };
+    bool callback_exception_propagated = false;
+    try {
+        index_parser.parse_database(sample_path("standard_sample.rdb"), abort_options);
+    } catch (const ProgressAbort&) {
+        callback_exception_propagated = true;
+    }
+    RDB_CHECK(callback_exception_propagated);
+    RDB_CHECK(!abort_progress.empty());
+    RDB_CHECK(abort_progress.back() != 100);
+
+    // 0 callback에서 파일이 크게 늘어나도 진행률 계산은 int 범위를 넘지 않는다.
+    const TemporaryRdb growing_file("X");
+    const int growing_fd = ::open(growing_file.path().c_str(), O_RDWR | O_CLOEXEC);
+    RDB_CHECK(growing_fd >= 0);
+    std::vector<int> growing_progress;
+    rdb::FastCheckIndexOptions growing_options;
+    growing_options.progress_callback = [&growing_progress, growing_fd](int value) {
+        growing_progress.push_back(value);
+        if (value == 0 &&
+            (::pwrite(growing_fd, "T 1\n", 4, 0) != 4 ||
+             ::ftruncate(growing_fd, 24 * 1024 * 1024) != 0)) {
+            throw std::runtime_error("cannot grow progress test file");
+        }
+    };
+    bool growing_file_rejected = false;
+    try {
+        index_parser.parse_database(growing_file.path(), growing_options);
+    } catch (const rdb::ScanError&) {
+        growing_file_rejected = true;
+    }
+    RDB_CHECK(growing_file_rejected);
+    RDB_CHECK(!growing_progress.empty());
+    RDB_CHECK(growing_progress.back() != 100);
+    for (std::size_t i = 0; i < growing_progress.size(); ++i) {
+        RDB_CHECK(growing_progress[i] >= 0);
+        RDB_CHECK(growing_progress[i] <= 100);
+    }
+    RDB_CHECK(::close(growing_fd) == 0);
 
     rdb::FastCheckIndexOptions small_index_options;
     small_index_options.read_buffer_bytes = 71;
@@ -169,6 +281,51 @@ int main() {
     RDB_CHECK(blank_header_index.top_cell_name == "TOP CELL BLOCK");
     RDB_CHECK(blank_header_index.database_precision == 1.25e-3);
     RDB_CHECK(blank_header_index.checks.size() == 1);
+
+    // 시간 header 뒤부터 첫 p/e signature 전까지 선언된 comment 줄을 원문대로 보존한다.
+    const TemporaryRdb comment_file(
+        "TOP 0.001\r\nCOMMENT.CHECK\r\n1 1 3 Jul 21 12:10:49 2026\r\n"
+        "first comment\r\n\r\n  third comment  \r\np 1 1\r\n0 0\r\n");
+    const rdb::CheckIndexDatabase comment_index =
+        index_parser.parse_database(comment_file.path());
+    RDB_CHECK(comment_index.checks.size() == 1);
+    RDB_CHECK(comment_index.checks[0].comments.size() == 3);
+    RDB_CHECK(comment_index.checks[0].comments[0] == "first comment");
+    RDB_CHECK(comment_index.checks[0].comments[1].empty());
+    RDB_CHECK(comment_index.checks[0].comments[2] == "  third comment  ");
+
+    // Comment 안의 가짜 이름/header 시간 패턴은 별도 Check로 인덱싱하지 않는다.
+    const TemporaryRdb header_like_comment_file(
+        "TOP 0.001\nREAL.CHECK\n1 1 3 Jul 21 12:10:49 2026\n"
+        "NOT.A.CHECK\n7 7 0 Jul 21 12:10:50 2026\nlast comment\n"
+        "p 1 1\n0 0\n");
+    const rdb::CheckIndexDatabase header_like_comment_index =
+        index_parser.parse_database(header_like_comment_file.path());
+    RDB_CHECK(header_like_comment_index.checks.size() == 1);
+    RDB_CHECK(header_like_comment_index.checks[0].name == "REAL.CHECK");
+    RDB_CHECK(header_like_comment_index.checks[0].comments.size() == 3);
+
+    // Comment가 pread block 경계를 넘고 마지막 LF가 없어도 전체 문자열을 보존한다.
+    const std::string long_comment(10000, 'C');
+    const TemporaryRdb long_comment_file(
+        std::string("TOP 0.001\nLONG.COMMENT\n0 0 1 Jul 21 12:10:49 2026\n") +
+        long_comment);
+    const rdb::CheckIndexDatabase long_comment_index =
+        index_parser.parse_database(long_comment_file.path());
+    RDB_CHECK(long_comment_index.checks.size() == 1);
+    RDB_CHECK(long_comment_index.checks[0].comments.size() == 1);
+    RDB_CHECK(long_comment_index.checks[0].comments[0] == long_comment);
+
+    // Header가 선언한 comment 줄 수보다 파일이 짧으면 조용히 누락시키지 않는다.
+    const TemporaryRdb truncated_comment_file(
+        "TOP 0.001\nTRUNCATED.COMMENT\n1 1 2 Jul 21 12:10:49 2026\nonly one\n");
+    bool truncated_comment_rejected = false;
+    try {
+        index_parser.parse_database(truncated_comment_file.path());
+    } catch (const rdb::ScanError&) {
+        truncated_comment_rejected = true;
+    }
+    RDB_CHECK(truncated_comment_rejected);
 
     // Top-cell/precision을 반환하는 API는 잘못된 첫 nonblank header를 거부한다.
     const TemporaryRdb invalid_header_file(

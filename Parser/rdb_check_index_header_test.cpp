@@ -2,6 +2,8 @@
 
 int main() {
     const rdb::FastCheckIndexParser parser;
+    rdb::FastCheckIndexOptions options;
+    options.progress_callback = [](int) {};
     (void)parser;
     return 0;
 }
