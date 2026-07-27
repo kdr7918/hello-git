@@ -4,12 +4,13 @@
 #include "ascii_rdb.hpp"
 #include "rdb_check_index.hpp"
 
+#include <QAbstractItemModel>
 #include <QHash>
 #include <QPair>
-#include <QStandardItemModel>
 #include <QStringList>
 #include <QVector>
 
+#include <memory>
 #include <vector>
 
 struct GroupingDimension {
@@ -38,12 +39,24 @@ struct TreeSelection {
 };
 
 /*
- * Check 목록과 All Params 그룹 Tree를 전담하는 모델이다. View는 이 모델을 표시만
- * 하고, 선택된 노드가 뜻하는 Check/Result 조건은 selectionForIndex()로 얻는다.
+ * Check 목록과 All Params 그룹 Tree를 전담하는 경량 모델이다. QStandardItem을
+ * 만들지 않고 Node가 Parser 결과를 위한 최소 표시/선택 정보만 보관한다. View는 이
+ * 모델을 표시만 하고, 선택된 노드가 뜻하는 Check/Result 조건은
+ * selectionForIndex()로 얻는다.
  */
-class CheckTreeModel : public QStandardItemModel {
+class CheckTreeModel : public QAbstractItemModel {
 public:
     explicit CheckTreeModel(QObject* parent = 0);
+
+    QModelIndex index(int row, int column,
+                      const QModelIndex& parent = QModelIndex()) const override;
+    QModelIndex parent(const QModelIndex& child) const override;
+    int rowCount(const QModelIndex& parent = QModelIndex()) const override;
+    int columnCount(const QModelIndex& parent = QModelIndex()) const override;
+    QVariant data(const QModelIndex& index, int role = Qt::DisplayRole) const override;
+    QVariant headerData(int section, Qt::Orientation orientation,
+                         int role = Qt::DisplayRole) const override;
+    Qt::ItemFlags flags(const QModelIndex& index) const override;
 
     void clearTree();
     void rebuildIndex(const rdb::CheckIndexDatabase& index);
@@ -65,27 +78,39 @@ public:
 private:
     typedef QVector<QPair<int, rdb::Index> > ResultList;
 
+    struct Node {
+        explicit Node(Node* parentNode = 0, int rowInParent = -1)
+            : parent(parentNode), row(rowInParent), count(0) {}
+
+        Node* parent;
+        int row;
+        QString label;
+        qulonglong count;
+        TreeSelection selection;
+        std::vector<std::unique_ptr<Node> > children;
+    };
+
+    Node* nodeForIndex(const QModelIndex& index) const;
+    void clearNodes();
     void rebuildFullTree();
-    void appendFullTreeLevel(QStandardItem* parent,
+    void appendFullTreeLevel(Node* parent,
                              int depth,
                              const ResultList& results,
                              const std::vector<GroupCondition>& conditions);
-    void appendTreeRow(QStandardItem* parent,
-                       const QString& label,
-                       qulonglong count,
-                       const TreeSelection& selection);
-    QString addSelection(const TreeSelection& selection);
+    Node* appendTreeRow(Node* parent,
+                        const QString& label,
+                        qulonglong count,
+                        const TreeSelection& selection);
     QStringList valuesForDimension(int checkRow,
                                    const rdb::Result& result,
                                    const GroupingDimension& dimension) const;
     static QString conditionIdentity(const std::vector<GroupCondition>& conditions);
     static QString checkIdentity(const QString& name);
-    void setHeaders();
 
     const rdb::Database* database_;
     std::vector<GroupingDimension> grouping_;
-    QHash<QString, TreeSelection> selections_;
-    quint64 selectionSerial_;
+    std::unique_ptr<Node> root_;
+    QHash<QString, Node*> nodesByIdentity_;
 };
 
 #endif // RDB_CHECK_TREE_MODEL_HPP

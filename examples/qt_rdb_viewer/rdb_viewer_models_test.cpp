@@ -14,6 +14,7 @@ private slots:
     void parameterResultCreatesKeyColumns();
     void replacementRestoresSelection();
     void treeModelGroupsDuplicateCheckNames();
+    void treeModelProvidesParentChildIndexes();
 };
 
 void RdbViewerModelsTest::checkModelUsesRequestedColumns() {
@@ -112,6 +113,50 @@ void RdbViewerModelsTest::treeModelGroupsDuplicateCheckNames() {
     TreeSelection selection;
     QVERIFY(model.selectionForIndex(model.index(0, 0), selection));
     QCOMPARE(selection.checkRows, QVector<int>() << 0 << 1);
+}
+
+void RdbViewerModelsTest::treeModelProvidesParentChildIndexes() {
+    rdb::Database database;
+    const rdb::StringId firstCheckName = database.strings.add("M1.SPACING");
+    const rdb::StringId secondCheckName = database.strings.add("M2.DENSITY");
+    const rdb::StringId key = database.strings.add("Layer");
+    const rdb::StringId firstValue = database.strings.add("M1");
+    const rdb::StringId secondValue = database.strings.add("M2");
+    database.tagged_values.push_back(rdb::TaggedValue(key, firstValue));
+    database.tagged_values.push_back(rdb::TaggedValue(key, secondValue));
+
+    rdb::Result firstResult;
+    firstResult.properties_before_geometry = rdb::Range(0, 1);
+    rdb::Result secondResult;
+    secondResult.properties_before_geometry = rdb::Range(1, 1);
+    database.results.push_back(firstResult);
+    database.results.push_back(secondResult);
+
+    rdb::RuleCheck firstRuleCheck;
+    firstRuleCheck.name = firstCheckName;
+    firstRuleCheck.results = rdb::Range(0, 1);
+    rdb::RuleCheck secondRuleCheck;
+    secondRuleCheck.name = secondCheckName;
+    secondRuleCheck.results = rdb::Range(1, 1);
+    database.rule_checks.push_back(firstRuleCheck);
+    database.rule_checks.push_back(secondRuleCheck);
+
+    CheckTreeModel model;
+    model.rebuildFull(database);
+    model.setGrouping(1, GroupingDimension(GroupingDimension::TaggedValueKey, "Layer"));
+
+    const QModelIndex firstCheck = model.index(0, 0);
+    const QModelIndex firstValueNode = model.index(0, 0, firstCheck);
+    QVERIFY(firstCheck.isValid());
+    QVERIFY(firstValueNode.isValid());
+    QCOMPARE(firstValueNode.data().toString(), QString("M1"));
+    QCOMPARE(model.parent(firstValueNode), firstCheck);
+
+    TreeSelection selection;
+    QVERIFY(model.selectionForIndex(firstValueNode, selection));
+    QCOMPARE(selection.conditions.size(), static_cast<std::size_t>(2));
+    QCOMPARE(selection.conditions[0].value, QString("M1.SPACING"));
+    QCOMPARE(selection.conditions[1].value, QString("M1"));
 }
 
 QTEST_MAIN(RdbViewerModelsTest)

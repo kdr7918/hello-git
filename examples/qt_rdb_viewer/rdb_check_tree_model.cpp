@@ -1,45 +1,95 @@
 #include "rdb_check_tree_model.hpp"
 
 #include <QMap>
-#include <QStandardItem>
 
 CheckTreeModel::CheckTreeModel(QObject* parent)
-    : QStandardItemModel(parent), database_(0), selectionSerial_(0) {
+    : QAbstractItemModel(parent), database_(0), root_(new Node) {
     grouping_.push_back(GroupingDimension(GroupingDimension::CheckName));
-    setHeaders();
+}
+
+QModelIndex CheckTreeModel::index(int row, int column, const QModelIndex& parentIndex) const {
+    if (row < 0 || column < 0 || column >= columnCount() ||
+        (parentIndex.isValid() && parentIndex.column() != 0)) {
+        return QModelIndex();
+    }
+    Node* parentNode = nodeForIndex(parentIndex);
+    if (!parentNode || row >= static_cast<int>(parentNode->children.size())) return QModelIndex();
+    return createIndex(row, column, parentNode->children[static_cast<std::size_t>(row)].get());
+}
+
+QModelIndex CheckTreeModel::parent(const QModelIndex& child) const {
+    Node* node = nodeForIndex(child);
+    if (!node || node == root_.get() || !node->parent || node->parent == root_.get()) {
+        return QModelIndex();
+    }
+    return createIndex(node->parent->row, 0, node->parent);
+}
+
+int CheckTreeModel::rowCount(const QModelIndex& parentIndex) const {
+    if (parentIndex.isValid() && parentIndex.column() != 0) return 0;
+    Node* parentNode = nodeForIndex(parentIndex);
+    return parentNode ? static_cast<int>(parentNode->children.size()) : 0;
+}
+
+int CheckTreeModel::columnCount(const QModelIndex& parentIndex) const {
+    (void)parentIndex;
+    return 2;
+}
+
+QVariant CheckTreeModel::data(const QModelIndex& index, int role) const {
+    Node* node = nodeForIndex(index);
+    if (!node || node == root_.get()) return QVariant();
+    if (role == Qt::DisplayRole) {
+        return index.column() == 0 ? QVariant(node->label) : QVariant(QString::number(node->count));
+    }
+    if (role == Qt::UserRole) return node->selection.identity;
+    if (role == Qt::TextAlignmentRole && index.column() == 1) {
+        return static_cast<int>(Qt::AlignRight | Qt::AlignVCenter);
+    }
+    return QVariant();
+}
+
+QVariant CheckTreeModel::headerData(int section, Qt::Orientation orientation, int role) const {
+    if (orientation != Qt::Horizontal || role != Qt::DisplayRole) return QVariant();
+    if (section == 0) return tr("Check Name");
+    if (section == 1) return tr("Count");
+    return QVariant();
+}
+
+Qt::ItemFlags CheckTreeModel::flags(const QModelIndex& index) const {
+    return index.isValid() ? Qt::ItemIsEnabled | Qt::ItemIsSelectable : Qt::NoItemFlags;
 }
 
 void CheckTreeModel::clearTree() {
+    beginResetModel();
     database_ = 0;
     grouping_.clear();
     grouping_.push_back(GroupingDimension(GroupingDimension::CheckName));
-    selections_.clear();
-    clear();
-    setHeaders();
+    clearNodes();
+    endResetModel();
 }
 
 void CheckTreeModel::rebuildIndex(const rdb::CheckIndexDatabase& index) {
+    beginResetModel();
     database_ = 0;
-    selections_.clear();
-    clear();
-    setHeaders();
+    clearNodes();
 
     typedef QPair<qulonglong, QVector<int> > Group;
     QMap<QString, Group> grouped;
     for (std::size_t row = 0; row < index.checks.size(); ++row) {
         const rdb::CheckIndexEntry& entry = index.checks[row];
         const QString name = QString::fromStdString(entry.name);
-        Group group = grouped.value(name);
+        Group& group = grouped[name];
         group.first += entry.geometry_count;
         group.second.append(static_cast<int>(row));
-        grouped.insert(name, group);
     }
     for (QMap<QString, Group>::const_iterator it = grouped.constBegin(); it != grouped.constEnd(); ++it) {
         TreeSelection selection;
         selection.checkRows = it.value().second;
         selection.identity = checkIdentity(it.key());
-        appendTreeRow(0, it.key(), it.value().first, selection);
+        appendTreeRow(root_.get(), it.key(), it.value().first, selection);
     }
+    endResetModel();
 }
 
 void CheckTreeModel::rebuildFull(const rdb::Database& database) {
@@ -80,10 +130,9 @@ QStringList CheckTreeModel::availableTagKeys() const {
 }
 
 bool CheckTreeModel::selectionForIndex(const QModelIndex& index, TreeSelection& selection) const {
-    if (!index.isValid()) return false;
-    const QString id = index.sibling(index.row(), 0).data(Qt::UserRole).toString();
-    if (!selections_.contains(id)) return false;
-    selection = selections_.value(id);
+    Node* node = nodeForIndex(index);
+    if (!node || node == root_.get() || node->selection.identity.isEmpty()) return false;
+    selection = node->selection;
     return true;
 }
 
@@ -93,15 +142,8 @@ QString CheckTreeModel::selectionIdentity(const QModelIndex& index) const {
 }
 
 QModelIndex CheckTreeModel::indexForIdentity(const QString& identity) const {
-    if (identity.isEmpty() || rowCount() == 0) return QModelIndex();
-    for (QHash<QString, TreeSelection>::const_iterator it = selections_.constBegin();
-         it != selections_.constEnd(); ++it) {
-        if (it.value().identity != identity) continue;
-        const QModelIndexList matches = match(index(0, 0), Qt::UserRole, it.key(), 1,
-                                              Qt::MatchExactly | Qt::MatchRecursive);
-        return matches.isEmpty() ? QModelIndex() : matches.first();
-    }
-    return QModelIndex();
+    Node* node = nodesByIdentity_.value(identity, 0);
+    return node ? createIndex(node->row, 0, node) : QModelIndex();
 }
 
 bool CheckTreeModel::matchesConditions(
@@ -117,9 +159,8 @@ bool CheckTreeModel::matchesConditions(
 
 void CheckTreeModel::rebuildFullTree() {
     if (!database_) return;
-    selections_.clear();
-    clear();
-    setHeaders();
+    beginResetModel();
+    clearNodes();
     ResultList results;
     for (std::size_t check = 0; check < database_->rule_checks.size(); ++check) {
         const rdb::RuleCheck& rule = database_->rule_checks[check];
@@ -127,10 +168,11 @@ void CheckTreeModel::rebuildFullTree() {
             results.append(qMakePair(static_cast<int>(check), rule.results.begin + offset));
         }
     }
-    appendFullTreeLevel(0, 0, results, std::vector<GroupCondition>());
+    appendFullTreeLevel(root_.get(), 0, results, std::vector<GroupCondition>());
+    endResetModel();
 }
 
-void CheckTreeModel::appendFullTreeLevel(QStandardItem* parent,
+void CheckTreeModel::appendFullTreeLevel(Node* parent,
                                          int depth,
                                          const ResultList& results,
                                          const std::vector<GroupCondition>& conditions) {
@@ -151,34 +193,36 @@ void CheckTreeModel::appendFullTreeLevel(QStandardItem* parent,
         TreeSelection selection;
         selection.conditions = childConditions;
         selection.identity = conditionIdentity(childConditions);
-        QStandardItem* child = new QStandardItem(it.key());
-        QStandardItem* count = new QStandardItem(QString::number(it.value().size()));
-        child->setData(addSelection(selection), Qt::UserRole);
-        child->setEditable(false);
-        count->setEditable(false);
-        if (parent) parent->appendRow(QList<QStandardItem*>() << child << count);
-        else appendRow(QList<QStandardItem*>() << child << count);
+        Node* child = appendTreeRow(parent, it.key(),
+                                    static_cast<qulonglong>(it.value().size()), selection);
         appendFullTreeLevel(child, depth + 1, it.value(), childConditions);
     }
 }
 
-void CheckTreeModel::appendTreeRow(QStandardItem* parent,
-                                   const QString& label,
-                                   qulonglong count,
-                                   const TreeSelection& selection) {
-    QStandardItem* name = new QStandardItem(label);
-    QStandardItem* countItem = new QStandardItem(QString::number(count));
-    name->setData(addSelection(selection), Qt::UserRole);
-    name->setEditable(false);
-    countItem->setEditable(false);
-    if (parent) parent->appendRow(QList<QStandardItem*>() << name << countItem);
-    else appendRow(QList<QStandardItem*>() << name << countItem);
+CheckTreeModel::Node* CheckTreeModel::appendTreeRow(Node* parent,
+                                                     const QString& label,
+                                                     qulonglong count,
+                                                     const TreeSelection& selection) {
+    Node* parentNode = parent ? parent : root_.get();
+    const int row = static_cast<int>(parentNode->children.size());
+    parentNode->children.push_back(std::unique_ptr<Node>(new Node(parentNode, row)));
+    Node* node = parentNode->children.back().get();
+    node->label = label;
+    node->count = count;
+    node->selection = selection;
+    if (!selection.identity.isEmpty()) nodesByIdentity_.insert(selection.identity, node);
+    return node;
 }
 
-QString CheckTreeModel::addSelection(const TreeSelection& selection) {
-    const QString id = QStringLiteral("node-%1").arg(++selectionSerial_);
-    selections_.insert(id, selection);
-    return id;
+CheckTreeModel::Node* CheckTreeModel::nodeForIndex(const QModelIndex& index) const {
+    if (!index.isValid()) return root_.get();
+    if (index.model() != this) return 0;
+    return static_cast<Node*>(index.internalPointer());
+}
+
+void CheckTreeModel::clearNodes() {
+    root_->children.clear();
+    nodesByIdentity_.clear();
 }
 
 QStringList CheckTreeModel::valuesForDimension(int checkRow,
@@ -224,8 +268,4 @@ QString CheckTreeModel::checkIdentity(const QString& name) {
     condition.value = name;
     conditions.push_back(condition);
     return conditionIdentity(conditions);
-}
-
-void CheckTreeModel::setHeaders() {
-    setHorizontalHeaderLabels(QStringList() << tr("Check Name") << tr("Count"));
 }
