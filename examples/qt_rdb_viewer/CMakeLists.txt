@@ -12,6 +12,8 @@ set(CMAKE_AUTOMOC ON)
 
 add_executable(qt-rdb-viewer
     main.cpp
+    rdb_check_tree_model.cpp
+    rdb_check_tree_model.hpp
     rdb_viewer.cpp
     rdb_viewer.hpp
     rdb_viewer_models.cpp
@@ -30,6 +32,8 @@ target_compile_options(qt-rdb-viewer PRIVATE
 if(BUILD_TESTING)
     add_executable(qt-rdb-viewer-tests
         rdb_viewer_models_test.cpp
+        rdb_check_tree_model.cpp
+        rdb_check_tree_model.hpp
         rdb_viewer_models.cpp
         rdb_viewer_models.hpp
     )
@@ -47,6 +51,8 @@ if(BUILD_TESTING)
 
     add_executable(qt-rdb-viewer-integration-tests
         rdb_viewer_integration_test.cpp
+        rdb_check_tree_model.cpp
+        rdb_check_tree_model.hpp
         rdb_viewer.cpp
         rdb_viewer.hpp
         rdb_viewer_models.cpp

@@ -5,11 +5,10 @@
 #include "rdb_check_detail.hpp"
 #include "rdb_check_geometry.hpp"
 #include "rdb_check_geometry_detail.hpp"
+#include "rdb_check_tree_model.hpp"
 #include "rdb_viewer_models.hpp"
 
-#include <QHash>
 #include <QMainWindow>
-#include <QPair>
 #include <QString>
 #include <QVector>
 
@@ -21,38 +20,11 @@ class QDockWidget;
 class QLabel;
 class QLineEdit;
 class QProgressBar;
-class QStandardItem;
-class QStandardItemModel;
 class QStackedWidget;
 class QTableView;
 class QTreeView;
 
 struct RdbViewerAsyncState;
-
-struct GroupingDimension {
-    enum Kind { CheckName, TaggedValueKey };
-
-    Kind kind;
-    QString key;
-
-    GroupingDimension() : kind(CheckName) {}
-    explicit GroupingDimension(Kind type, const QString& value = QString())
-        : kind(type), key(value) {}
-    bool equals(const GroupingDimension& other) const {
-        return kind == other.kind && key == other.key;
-    }
-};
-
-struct GroupCondition {
-    GroupingDimension dimension;
-    QString value;
-};
-
-struct TreeSelection {
-    QVector<int> checkRows;
-    std::vector<GroupCondition> conditions;
-    QString identity;
-};
 
 class RdbViewer : public QMainWindow {
 public:
@@ -85,32 +57,15 @@ private:
 
     void rebuildIndexTree(bool preserveSelection);
     void rebuildFullTree(bool preserveSelection);
-    void appendFullTreeLevel(QStandardItem* parent,
-                             int depth,
-                             const QVector<QPair<int, rdb::Index> >& results,
-                             const std::vector<GroupCondition>& conditions);
-    void appendTreeRow(QStandardItem* parent,
-                       const QString& label,
-                       qulonglong count,
-                       const TreeSelection& selection);
-    QString addTreeSelection(const TreeSelection& selection);
     QString currentTreeSelectionIdentity() const;
     void restoreTreeSelection(const QString& identity);
     void showGroupingMenu(const QPoint& point);
-    void setGrouping(int depth, const GroupingDimension& dimension);
-    QStringList availableTagKeys() const;
     void findTreeText(bool forward);
 
     bool resultMatchesConditions(const rdb::Database& database,
                                  int checkRow,
                                  const rdb::Result& result,
                                  const std::vector<GroupCondition>& conditions) const;
-    QStringList valuesForDimension(const rdb::Database& database,
-                                   int checkRow,
-                                   const rdb::Result& result,
-                                   const GroupingDimension& dimension) const;
-    static QString conditionIdentity(const std::vector<GroupCondition>& conditions);
-    static QString checkIdentity(const QString& name);
 
     static QVector<DetailRow> rowsFromDetailBatch(
         const std::vector<rdb::DetailResult>& batch, rdb::CheckOffset offset);
@@ -140,7 +95,7 @@ private:
 
     CheckTableModel* checkModel_;
     ResultTableModel* detailModel_;
-    QStandardItemModel* treeModel_;
+    CheckTreeModel* treeModel_;
     QDockWidget* dock_;
     QStackedWidget* leftStack_;
     QTableView* checkView_;
@@ -150,9 +105,6 @@ private:
     QLabel* statusLabel_;
     QProgressBar* indexProgress_;
 
-    std::vector<GroupingDimension> grouping_;
-    QHash<QString, TreeSelection> treeSelections_;
-    quint64 treeSelectionSerial_;
     bool rebuildingTree_;
 };
 

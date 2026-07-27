@@ -16,8 +16,6 @@
 #include <QPushButton>
 #include <QSplitter>
 #include <QStackedWidget>
-#include <QStandardItem>
-#include <QStandardItemModel>
 #include <QStatusBar>
 #include <QTableView>
 #include <QTreeView>
@@ -181,7 +179,7 @@ RdbViewer::RdbViewer(QWidget* parent)
       asyncState_(new RdbViewerAsyncState),
       checkModel_(new CheckTableModel(this)),
       detailModel_(new ResultTableModel(this)),
-      treeModel_(new QStandardItemModel(this)),
+      treeModel_(new CheckTreeModel(this)),
       dock_(new QDockWidget(tr("RDB results"), this)),
       leftStack_(new QStackedWidget(dock_)),
       checkView_(new QTableView(leftStack_)),
@@ -190,7 +188,6 @@ RdbViewer::RdbViewer(QWidget* parent)
       treeSearch_(new QLineEdit(dock_)),
       statusLabel_(new QLabel(this)),
       indexProgress_(new QProgressBar(this)),
-      treeSelectionSerial_(0),
       rebuildingTree_(false) {
     setWindowTitle(tr("ASCII RDB Viewer"));
     resize(1200, 760);
@@ -234,7 +231,6 @@ RdbViewer::RdbViewer(QWidget* parent)
     detailView_->horizontalHeader()->setStretchLastSection(true);
     treeView_->header()->setContextMenuPolicy(Qt::CustomContextMenu);
 
-    treeModel_->setHorizontalHeaderLabels(QStringList() << tr("Check Name") << tr("Count"));
     leftStack_->addWidget(checkView_);
     QWidget* treePage = new QWidget(leftStack_);
     QVBoxLayout* treeLayout = new QVBoxLayout(treePage);
@@ -273,8 +269,6 @@ RdbViewer::RdbViewer(QWidget* parent)
         "QDockWidget::title { background: #203443; color: #f4f7f8; padding: 6px 9px; }"
         "QTableView::item:selected, QTreeView::item:selected { background: #0d7280; color: white; }"
         "QHeaderView::section { background: #e8eef0; color: #203443; padding: 5px; border: 0; }"));
-
-    grouping_.push_back(GroupingDimension(GroupingDimension::CheckName));
 
     connect(checkView_->selectionModel(), &QItemSelectionModel::currentRowChanged,
             this, [this](const QModelIndex& current, const QModelIndex&) {
@@ -315,11 +309,7 @@ void RdbViewer::openFile(const QString& path, RdbViewerMode mode) {
     checkModel_->setIndex(rdb::CheckIndexDatabase());
     detailModel_->setMode(mode_);
     detailModel_->clear();
-    treeModel_->clear();
-    treeModel_->setHorizontalHeaderLabels(QStringList() << tr("Check Name") << tr("Count"));
-    treeSelections_.clear();
-    grouping_.clear();
-    grouping_.push_back(GroupingDimension(GroupingDimension::CheckName));
+    treeModel_->clearTree();
     leftStack_->setCurrentIndex(mode_ == RdbViewerMode::CoordinatesOnly ? 0 : 1);
     indexProgress_->setValue(0);
     dock_->show();
@@ -521,9 +511,8 @@ void RdbViewer::showSelectedCheckRow(int row) {
 
 void RdbViewer::showSelectedTreeNode(const QModelIndex& current) {
     if (rebuildingTree_ || !current.isValid()) return;
-    const QString id = current.sibling(current.row(), 0).data(Qt::UserRole).toString();
-    if (!treeSelections_.contains(id)) return;
-    const TreeSelection selection = treeSelections_.value(id);
+    TreeSelection selection;
+    if (!treeModel_->selectionForIndex(current, selection)) return;
     if (fullDatabase_) {
         selectedCheckRows_.clear();
         selectedConditions_ = selection.conditions;
@@ -672,25 +661,7 @@ void RdbViewer::rebuildIndexTree(bool preserveSelection) {
     if (mode_ != RdbViewerMode::AllParameters) return;
     const QString previous = preserveSelection ? currentTreeSelectionIdentity() : QString();
     rebuildingTree_ = true;
-    treeModel_->clear();
-    treeModel_->setHorizontalHeaderLabels(QStringList() << tr("Check Name") << tr("Count"));
-    treeSelections_.clear();
-    typedef QPair<qulonglong, QVector<int> > Group;
-    QMap<QString, Group> grouped;
-    for (int row = 0; row < checkModel_->rowCount(); ++row) {
-        const rdb::CheckIndexEntry& entry = checkModel_->entryAt(row);
-        const QString name = QString::fromStdString(entry.name);
-        Group group = grouped.value(name);
-        group.first += entry.geometry_count;
-        group.second.append(row);
-        grouped.insert(name, group);
-    }
-    for (QMap<QString, Group>::const_iterator it = grouped.constBegin(); it != grouped.constEnd(); ++it) {
-        TreeSelection selection;
-        selection.checkRows = it.value().second;
-        selection.identity = checkIdentity(it.key());
-        appendTreeRow(0, it.key(), it.value().first, selection);
-    }
+    treeModel_->rebuildIndex(checkModel_->indexDatabase());
     rebuildingTree_ = false;
     treeView_->expandAll();
     restoreTreeSelection(previous);
@@ -700,104 +671,22 @@ void RdbViewer::rebuildFullTree(bool preserveSelection) {
     if (!fullDatabase_ || mode_ != RdbViewerMode::AllParameters) return;
     const QString previous = preserveSelection ? currentTreeSelectionIdentity() : QString();
     rebuildingTree_ = true;
-    treeModel_->clear();
-    treeModel_->setHorizontalHeaderLabels(QStringList() << tr("Check Name") << tr("Count"));
-    treeSelections_.clear();
-    QVector<QPair<int, rdb::Index> > results;
-    for (std::size_t check = 0; check < fullDatabase_->rule_checks.size(); ++check) {
-        const rdb::RuleCheck& rule = fullDatabase_->rule_checks[check];
-        for (rdb::Index offset = 0; offset < rule.results.count; ++offset) {
-            results.append(qMakePair(static_cast<int>(check), rule.results.begin + offset));
-        }
-    }
-    appendFullTreeLevel(0, 0, results, std::vector<GroupCondition>());
+    treeModel_->rebuildFull(*fullDatabase_);
     rebuildingTree_ = false;
     treeView_->expandAll();
     restoreTreeSelection(previous);
 }
 
-void RdbViewer::appendFullTreeLevel(QStandardItem* parent,
-                                    int depth,
-                                    const QVector<QPair<int, rdb::Index> >& results,
-                                    const std::vector<GroupCondition>& conditions) {
-    if (depth >= static_cast<int>(grouping_.size())) return;
-    typedef QVector<QPair<int, rdb::Index> > ResultList;
-    QMap<QString, ResultList> groups;
-    const GroupingDimension& dimension = grouping_[static_cast<std::size_t>(depth)];
-    for (const QPair<int, rdb::Index>& reference : results) {
-        const rdb::Result& result = fullDatabase_->results.at(reference.second);
-        const QStringList values = valuesForDimension(*fullDatabase_, reference.first, result, dimension);
-        for (const QString& value : values) groups[value].append(reference);
-    }
-    for (QMap<QString, ResultList>::const_iterator it = groups.constBegin(); it != groups.constEnd(); ++it) {
-        std::vector<GroupCondition> childConditions = conditions;
-        GroupCondition condition;
-        condition.dimension = dimension;
-        condition.value = it.key();
-        childConditions.push_back(condition);
-        TreeSelection selection;
-        selection.conditions = childConditions;
-        selection.identity = conditionIdentity(childConditions);
-        QStandardItem* child = new QStandardItem(it.key());
-        QStandardItem* count = new QStandardItem(QString::number(it.value().size()));
-        child->setData(addTreeSelection(selection), Qt::UserRole);
-        child->setEditable(false);
-        count->setEditable(false);
-        if (parent) parent->appendRow(QList<QStandardItem*>() << child << count);
-        else treeModel_->appendRow(QList<QStandardItem*>() << child << count);
-        appendFullTreeLevel(child, depth + 1, it.value(), childConditions);
-    }
-}
-
-void RdbViewer::appendTreeRow(QStandardItem* parent,
-                              const QString& label,
-                              qulonglong count,
-                              const TreeSelection& selection) {
-    QStandardItem* name = new QStandardItem(label);
-    QStandardItem* countItem = new QStandardItem(QString::number(count));
-    name->setData(addTreeSelection(selection), Qt::UserRole);
-    name->setEditable(false);
-    countItem->setEditable(false);
-    if (parent) parent->appendRow(QList<QStandardItem*>() << name << countItem);
-    else treeModel_->appendRow(QList<QStandardItem*>() << name << countItem);
-}
-
-QString RdbViewer::addTreeSelection(const TreeSelection& selection) {
-    const QString id = QStringLiteral("node-%1").arg(++treeSelectionSerial_);
-    treeSelections_.insert(id, selection);
-    return id;
-}
-
 QString RdbViewer::currentTreeSelectionIdentity() const {
-    const QModelIndex current = treeView_->currentIndex();
-    if (!current.isValid()) return QString();
-    const QString id = current.sibling(current.row(), 0).data(Qt::UserRole).toString();
-    return treeSelections_.contains(id) ? treeSelections_.value(id).identity : QString();
+    return treeModel_->selectionIdentity(treeView_->currentIndex());
 }
 
 void RdbViewer::restoreTreeSelection(const QString& identity) {
-    QString target = identity;
-    if (target.isEmpty() && treeModel_->rowCount() > 0) {
-        const QModelIndex first = treeModel_->index(0, 0);
+    QModelIndex target = treeModel_->indexForIdentity(identity);
+    if (!target.isValid() && treeModel_->rowCount() > 0) target = treeModel_->index(0, 0);
+    if (target.isValid()) {
         treeView_->selectionModel()->setCurrentIndex(
-            first, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-        return;
-    }
-    for (QHash<QString, TreeSelection>::const_iterator it = treeSelections_.constBegin();
-         it != treeSelections_.constEnd(); ++it) {
-        if (it.value().identity != target) continue;
-        const QModelIndexList matches = treeModel_->match(
-            treeModel_->index(0, 0), Qt::UserRole, it.key(), 1,
-            Qt::MatchExactly | Qt::MatchRecursive);
-        if (!matches.isEmpty()) {
-            treeView_->selectionModel()->setCurrentIndex(
-                matches.first(), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-        }
-        return;
-    }
-    if (treeModel_->rowCount() > 0) {
-        treeView_->selectionModel()->setCurrentIndex(
-            treeModel_->index(0, 0), QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+            target, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
     }
 }
 
@@ -806,62 +695,46 @@ void RdbViewer::showGroupingMenu(const QPoint& point) {
     QMenu menu(this);
     QAction* reset = menu.addAction(tr("Reset to Check Name"));
     connect(reset, &QAction::triggered, this, [this]() {
-        grouping_.clear();
-        grouping_.push_back(GroupingDimension(GroupingDimension::CheckName));
-        rebuildFullTree(true);
+        const QString previous = currentTreeSelectionIdentity();
+        treeModel_->resetGrouping();
+        treeView_->expandAll();
+        restoreTreeSelection(previous);
     });
     menu.addSeparator();
 
     std::vector<GroupingDimension> candidates;
     candidates.push_back(GroupingDimension(GroupingDimension::CheckName));
-    const QStringList keys = availableTagKeys();
+    const QStringList keys = treeModel_->availableTagKeys();
     for (const QString& key : keys) candidates.push_back(GroupingDimension(GroupingDimension::TaggedValueKey, key));
     for (int depth = 0; depth < 3; ++depth) {
         QMenu* depthMenu = menu.addMenu(tr("Grouping depth %1").arg(depth + 1));
-        const bool available = depth == 0 || static_cast<int>(grouping_.size()) >= depth;
+        const std::vector<GroupingDimension>& grouping = treeModel_->grouping();
+        const bool available = depth == 0 || static_cast<int>(grouping.size()) >= depth;
         for (std::vector<GroupingDimension>::const_iterator it = candidates.begin(); it != candidates.end(); ++it) {
             const GroupingDimension dimension = *it;
             const QString title = dimension.kind == GroupingDimension::CheckName
                 ? tr("Check Name") : dimension.key;
             QAction* action = depthMenu->addAction(title);
             bool usedAtAnotherDepth = false;
-            for (std::size_t selected = 0; selected < grouping_.size(); ++selected) {
-                if (static_cast<int>(selected) != depth && grouping_[selected].equals(dimension)) {
+            for (std::size_t selected = 0; selected < grouping.size(); ++selected) {
+                if (static_cast<int>(selected) != depth && grouping[selected].equals(dimension)) {
                     usedAtAnotherDepth = true;
                 }
             }
             action->setEnabled(available && !usedAtAnotherDepth);
             action->setCheckable(true);
-            action->setChecked(depth < static_cast<int>(grouping_.size()) &&
-                               grouping_[static_cast<std::size_t>(depth)].equals(dimension));
+            action->setChecked(depth < static_cast<int>(grouping.size()) &&
+                               grouping[static_cast<std::size_t>(depth)].equals(dimension));
             connect(action, &QAction::triggered, this,
-                    [this, depth, dimension]() { setGrouping(depth, dimension); });
+                    [this, depth, dimension]() {
+                        const QString previous = currentTreeSelectionIdentity();
+                        treeModel_->setGrouping(depth, dimension);
+                        treeView_->expandAll();
+                        restoreTreeSelection(previous);
+                    });
         }
     }
     menu.exec(treeView_->header()->mapToGlobal(point));
-}
-
-void RdbViewer::setGrouping(int depth, const GroupingDimension& dimension) {
-    if (depth < 0 || depth > 2) return;
-    if (depth > static_cast<int>(grouping_.size())) return;
-    if (depth == static_cast<int>(grouping_.size())) grouping_.push_back(dimension);
-    else {
-        grouping_[static_cast<std::size_t>(depth)] = dimension;
-        grouping_.resize(static_cast<std::size_t>(depth + 1));
-    }
-    rebuildFullTree(true);
-}
-
-QStringList RdbViewer::availableTagKeys() const {
-    QStringList keys;
-    if (!fullDatabase_) return keys;
-    for (std::vector<rdb::TaggedValue>::const_iterator it = fullDatabase_->tagged_values.begin();
-         it != fullDatabase_->tagged_values.end(); ++it) {
-        const QString key = QString::fromStdString(fullDatabase_->strings.get(it->id).str());
-        if (!key.isEmpty() && !keys.contains(key)) keys.append(key);
-    }
-    keys.sort();
-    return keys;
 }
 
 void RdbViewer::findTreeText(bool forward) {
@@ -898,58 +771,8 @@ bool RdbViewer::resultMatchesConditions(const rdb::Database& database,
                                         int checkRow,
                                         const rdb::Result& result,
                                         const std::vector<GroupCondition>& conditions) const {
-    for (std::vector<GroupCondition>::const_iterator it = conditions.begin();
-         it != conditions.end(); ++it) {
-        if (!valuesForDimension(database, checkRow, result, it->dimension).contains(it->value)) {
-            return false;
-        }
-    }
-    return true;
-}
-
-QStringList RdbViewer::valuesForDimension(const rdb::Database& database,
-                                          int checkRow,
-                                          const rdb::Result& result,
-                                          const GroupingDimension& dimension) const {
-    QStringList values;
-    if (checkRow < 0 || static_cast<std::size_t>(checkRow) >= database.rule_checks.size()) return values;
-    if (dimension.kind == GroupingDimension::CheckName) {
-        values.append(QString::fromStdString(database.strings.get(
-            database.rule_checks[static_cast<std::size_t>(checkRow)].name).str()));
-        return values;
-    }
-    const rdb::Range ranges[] = { result.properties_before_geometry, result.properties_after_geometry };
-    for (int rangeIndex = 0; rangeIndex < 2; ++rangeIndex) {
-        const rdb::Range& range = ranges[rangeIndex];
-        for (rdb::Index offset = 0; offset < range.count; ++offset) {
-            const rdb::TaggedValue& tag = database.tagged_values.at(range.begin + offset);
-            if (QString::fromStdString(database.strings.get(tag.id).str()) != dimension.key) continue;
-            const QString value = QString::fromStdString(database.strings.get(tag.payload).str());
-            if (!values.contains(value)) values.append(value);
-        }
-    }
-    if (values.isEmpty()) values.append(tr("(missing)"));
-    return values;
-}
-
-QString RdbViewer::conditionIdentity(const std::vector<GroupCondition>& conditions) {
-    QStringList items;
-    for (std::vector<GroupCondition>::const_iterator it = conditions.begin();
-         it != conditions.end(); ++it) {
-        const QString prefix = it->dimension.kind == GroupingDimension::CheckName
-            ? QStringLiteral("check") : QStringLiteral("tag:") + it->dimension.key;
-        items.append(prefix + QStringLiteral("=") + it->value);
-    }
-    return items.join(QStringLiteral("\x1e"));
-}
-
-QString RdbViewer::checkIdentity(const QString& name) {
-    std::vector<GroupCondition> conditions;
-    GroupCondition condition;
-    condition.dimension = GroupingDimension(GroupingDimension::CheckName);
-    condition.value = name;
-    conditions.push_back(condition);
-    return conditionIdentity(conditions);
+    (void)database;
+    return treeModel_->matchesConditions(checkRow, result, conditions);
 }
 
 QVector<DetailRow> RdbViewer::rowsFromDetailBatch(

@@ -1,3 +1,4 @@
+#include "rdb_check_tree_model.hpp"
 #include "rdb_viewer_models.hpp"
 
 #include <QItemSelectionModel>
@@ -12,6 +13,7 @@ private slots:
     void coordinateResultUsesSingleColumn();
     void parameterResultCreatesKeyColumns();
     void replacementRestoresSelection();
+    void treeModelGroupsDuplicateCheckNames();
 };
 
 void RdbViewerModelsTest::checkModelUsesRequestedColumns() {
@@ -84,6 +86,32 @@ void RdbViewerModelsTest::replacementRestoresSelection() {
 
     QCOMPARE(view.selectionModel()->selectedRows().size(), 1);
     QCOMPARE(model.rowAt(view.currentIndex().row()).stableKey(), QString("10:e:2"));
+}
+
+void RdbViewerModelsTest::treeModelGroupsDuplicateCheckNames() {
+    rdb::CheckIndexDatabase index;
+    rdb::CheckIndexEntry first;
+    first.name = "M1.SPACING";
+    first.geometry_count = 3;
+    index.checks.push_back(first);
+    rdb::CheckIndexEntry duplicate = first;
+    duplicate.geometry_count = 5;
+    index.checks.push_back(duplicate);
+    rdb::CheckIndexEntry other;
+    other.name = "M2.DENSITY";
+    other.geometry_count = 2;
+    index.checks.push_back(other);
+
+    CheckTreeModel model;
+    model.rebuildIndex(index);
+
+    QCOMPARE(model.columnCount(), 2);
+    QCOMPARE(model.rowCount(), 2);
+    QCOMPARE(model.index(0, 0).data().toString(), QString("M1.SPACING"));
+    QCOMPARE(model.index(0, 1).data().toString(), QString("8"));
+    TreeSelection selection;
+    QVERIFY(model.selectionForIndex(model.index(0, 0), selection));
+    QCOMPARE(selection.checkRows, QVector<int>() << 0 << 1);
 }
 
 QTEST_MAIN(RdbViewerModelsTest)
