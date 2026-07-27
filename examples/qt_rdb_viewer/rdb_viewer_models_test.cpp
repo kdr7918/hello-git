@@ -4,88 +4,86 @@
 #include <QTableView>
 #include <QtTest>
 
-#include <limits>
-#include <stdexcept>
-
 class RdbViewerModelsTest : public QObject {
     Q_OBJECT
 
 private slots:
-    void checkModelReceivesParsedIndex();
-    void detailModelAppendsBatch();
-    void detailModelRejectsAccumulatedRowsBeyondQtCapacity();
-    void replacementRestoresMultiSelectionAndCurrentRow();
+    void checkModelUsesRequestedColumns();
+    void coordinateResultUsesSingleColumn();
+    void parameterResultCreatesKeyColumns();
+    void replacementRestoresSelection();
 };
 
-void RdbViewerModelsTest::checkModelReceivesParsedIndex() {
+void RdbViewerModelsTest::checkModelUsesRequestedColumns() {
     rdb::CheckIndexDatabase index;
-    index.top_cell_name = "TOP";
-    index.database_precision = 0.001;
-    rdb::CheckIndexEntry first;
-    first.name = "M1.SPACING";
-    first.offset = 123;
-    first.geometry_count = 7;
-    first.comment = "minimum spacing";
-    index.checks.push_back(first);
+    rdb::CheckIndexEntry entry;
+    entry.name = "M1.SPACING";
+    entry.geometry_count = 7;
+    index.checks.push_back(entry);
 
     CheckTableModel model;
     model.setIndex(index);
 
-    QCOMPARE(model.rowCount(), 1);
-    QCOMPARE(model.index(0, CheckTableModel::Name).data().toString(), QString("M1.SPACING"));
+    QCOMPARE(model.columnCount(), 2);
+    QCOMPARE(model.headerData(CheckTableModel::Name, Qt::Horizontal).toString(), QString("Check Name"));
+    QCOMPARE(model.headerData(CheckTableModel::ResultCount, Qt::Horizontal).toString(), QString("Count"));
     QCOMPARE(model.index(0, CheckTableModel::ResultCount).data().toUInt(), 7U);
-    QCOMPARE(model.entryAt(0).offset, rdb::CheckOffset(123));
 }
 
-void RdbViewerModelsTest::detailModelAppendsBatch() {
-    DetailTableModel model;
-    QVector<DetailRow> batch;
-    batch << DetailRow::polygon(1, 4, "first")
-          << DetailRow::edgeCluster(2, 3, "second");
+void RdbViewerModelsTest::coordinateResultUsesSingleColumn() {
+    ResultTableModel model;
+    DetailRow row;
+    row.key = "10:p:1";
+    row.coordinates = "(0, 0)  (10, 10)";
+    model.appendRows(QVector<DetailRow>() << row);
 
-    model.appendRows(batch);
-
-    QCOMPARE(model.rowCount(), 2);
-    QCOMPARE(model.index(0, DetailTableModel::Kind).data().toString(), QString("Polygon"));
-    QCOMPARE(model.index(1, DetailTableModel::GeometryCount).data().toUInt(), 3U);
+    QCOMPARE(model.columnCount(), 1);
+    QCOMPARE(model.headerData(0, Qt::Horizontal).toString(), QString("Coords"));
+    QCOMPARE(model.index(0, 0).data().toString(), row.coordinates);
+    QCOMPARE(model.index(0, 0).data(Qt::ToolTipRole).toString(), row.coordinates);
 }
 
-void RdbViewerModelsTest::detailModelRejectsAccumulatedRowsBeyondQtCapacity() {
-    DetailTableModel::validateRowCapacity(std::numeric_limits<int>::max() - 5, 5);
-    QVERIFY_EXCEPTION_THROWN(
-        DetailTableModel::validateRowCapacity(std::numeric_limits<int>::max() - 5, 6),
-        std::length_error);
-    QVERIFY_EXCEPTION_THROWN(DetailTableModel::validateRowCapacity(0, -1), std::length_error);
+void RdbViewerModelsTest::parameterResultCreatesKeyColumns() {
+    ResultTableModel model;
+    model.setMode(RdbViewerMode::AllParameters);
+    DetailRow row;
+    row.key = "10:p:1";
+    row.resultLabel = "P 1";
+    row.taggedValues["CN"] << "metal1" << "via";
+    row.taggedValues["PP"] << "marker";
+    model.appendRows(QVector<DetailRow>() << row);
+
+    QCOMPARE(model.columnCount(), 3);
+    QCOMPARE(model.headerData(0, Qt::Horizontal).toString(), QString("Result"));
+    QCOMPARE(model.headerData(1, Qt::Horizontal).toString(), QString("CN"));
+    QCOMPARE(model.index(0, 1).data().toString(), QString("metal1\nvia"));
+    QCOMPARE(model.headerData(2, Qt::Horizontal).toString(), QString("PP"));
 }
 
-void RdbViewerModelsTest::replacementRestoresMultiSelectionAndCurrentRow() {
-    DetailTableModel model;
+void RdbViewerModelsTest::replacementRestoresSelection() {
+    ResultTableModel model;
     QTableView view;
     view.setModel(&model);
-    model.replaceRows(QVector<DetailRow>()
-        << DetailRow::polygon(1, 4, "old-1")
-        << DetailRow::edgeCluster(2, 2, "old-2")
-        << DetailRow::polygon(3, 8, "old-3"));
-
-    view.selectionModel()->select(
-        model.index(1, 0), QItemSelectionModel::Select | QItemSelectionModel::Rows);
-    view.selectionModel()->select(
-        model.index(2, 0), QItemSelectionModel::Select | QItemSelectionModel::Rows);
-    view.selectionModel()->setCurrentIndex(
-        model.index(2, 0), QItemSelectionModel::NoUpdate);
+    DetailRow first;
+    first.key = "10:p:1";
+    first.coordinates = "first";
+    DetailRow second;
+    second.key = "10:e:2";
+    second.coordinates = "second";
+    model.replaceRows(QVector<DetailRow>() << first << second);
+    view.selectionModel()->select(model.index(1, 0),
+                                  QItemSelectionModel::Select | QItemSelectionModel::Rows);
+    view.selectionModel()->setCurrentIndex(model.index(1, 0), QItemSelectionModel::NoUpdate);
     const TableSelectionSnapshot snapshot = TableSelectionKeeper::capture(view, model);
 
-    model.replaceRows(QVector<DetailRow>()
-        << DetailRow::polygon(9, 1, "new")
-        << DetailRow::edgeCluster(2, 2, "background-2")
-        << DetailRow::polygon(3, 8, "background-3"));
+    DetailRow replacement;
+    replacement.key = "10:p:0";
+    replacement.coordinates = "new";
+    model.replaceRows(QVector<DetailRow>() << replacement << second);
     TableSelectionKeeper::restore(view, model, snapshot);
 
-    const QModelIndexList selected = view.selectionModel()->selectedRows();
-    QCOMPARE(selected.size(), 2);
-    QCOMPARE(model.rowAt(selected[0].row()).ordinal, quint32(2));
-    QCOMPARE(model.rowAt(selected[1].row()).ordinal, quint32(3));
-    QCOMPARE(model.rowAt(view.currentIndex().row()).ordinal, quint32(3));
+    QCOMPARE(view.selectionModel()->selectedRows().size(), 1);
+    QCOMPARE(model.rowAt(view.currentIndex().row()).stableKey(), QString("10:e:2"));
 }
 
 QTEST_MAIN(RdbViewerModelsTest)

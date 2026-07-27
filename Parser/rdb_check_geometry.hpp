@@ -3,11 +3,24 @@
 
 #include "rdb_check_index.hpp"
 
+#include <functional>
 #include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
 namespace rdb {
+
+class GeometryParseCancelled : public std::runtime_error {
+public:
+    GeometryParseCancelled() : std::runtime_error("RDB geometry parsing cancelled") {}
+};
+
+typedef std::function<bool()> GeometryParseCancellationCallback;
+
+struct GeometryParseOptions {
+    GeometryParseCancellationCallback is_cancelled;
+};
 
 struct GeometryResult {
     // p/e 레코드 하나와 전역 vertices/edges 배열 안의 좌표 구간이다.
@@ -128,10 +141,12 @@ inline void reserve_geometry_values(std::vector<Value>& values,
 
 inline void consume_geometry(LineCursor& cursor,
                              const ResultSignature& signature,
-                             GeometryDatabase& database) {
+                             GeometryDatabase& database,
+                             const GeometryParseCancellationCallback& cancellation) {
     // 상세 파서와 달리 태그 문자열은 만들지 않고 좌표만 전역 배열에 추가한다.
     std::uint64_t seen = 0;
     while (seen < signature.coordinate_count) {
+        if (cancellation && cancellation()) throw GeometryParseCancelled();
         Line line;
         if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated result geometry");
         const Span text = line.text;
@@ -176,7 +191,8 @@ inline void consume_geometry(LineCursor& cursor,
  */
 class CheckGeometryParser {
 public:
-    GeometryDatabase parse_file(const std::string& path) const {
+    GeometryDatabase parse_file(const std::string& path,
+                                const GeometryParseOptions& options = GeometryParseOptions()) const {
         detail::MappedFile file(path);
         detail::LineCursor cursor(file);
         detail::Line top_header;
@@ -189,6 +205,7 @@ public:
         detail::Line name_line;
         detail::RuleHeader header;
         while (detail::next_rule(cursor, name_line, header)) {
+            if (options.is_cancelled && options.is_cancelled()) throw GeometryParseCancelled();
             GeometryCheck check;
             const detail::Span name = detail::trim(name_line.text);
             check.name.assign(name.begin, name.size());
@@ -203,6 +220,7 @@ public:
                 database.results.size(), check.offset, "result begin");
 
             for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
+                if (options.is_cancelled && options.is_cancelled()) throw GeometryParseCancelled();
                 detail::Line signature_line;
                 detail::ResultSignature signature;
                 if (!detail::next_result_signature(cursor, signature_line, signature)) {
@@ -224,7 +242,7 @@ public:
                         database.edges, signature.coordinate_count, signature_line.offset, "edge count");
                 }
 
-                detail::consume_geometry(cursor, signature, database);
+                detail::consume_geometry(cursor, signature, database, options.is_cancelled);
                 // p면 vertices, e면 edges 배열에서 이번 결과가 추가한 구간만 기록한다.
                 const std::size_t geometry_size = signature.kind == ResultKind::Polygon
                     ? database.vertices.size() - geometry_begin

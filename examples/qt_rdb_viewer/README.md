@@ -1,27 +1,40 @@
-# Qt 6 ASCII RDB TableView 예제
+# Qt 5.9 C++11 ASCII RDB Viewer
 
-기존 `Parser/` 코드를 실제 Qt GUI에서 조합한 예제입니다. 실행 시 다음 두 작업을 동시에 시작합니다.
+`Parser/`의 고속 파서를 Qt Widgets 화면에 연결한 예제다. Qt 5.9 API와 C++11만
+사용하며, Qt 5가 없는 개발 환경에서는 CMake가 Qt 6로 호환성 빌드한다.
 
-- `FastCheckIndexParser::parse_database()`로 Check index를 읽어 위 TableView 모델을 갱신
-- `AsciiRdbParser::parse_file()`로 모든 Check 상세 결과를 백그라운드 파싱
+## 사용
 
-Index 완료 후 첫 Check를 자동 선택합니다. 전체 백그라운드 파싱이 아직 끝나지 않았다면 선택 Check는 `CheckDetailParser::parse_file_at_batches()`로 별도 파싱하며 **10,000 result마다** 아래 TableView에 추가합니다. 다른 Check를 선택하면 cancellation token을 올려 기존 파싱을 중단하고 request ID로 이미 큐에 들어간 낡은 batch도 폐기합니다.
+`File` 메뉴에서 모드를 먼저 선택한다.
 
-전체 백그라운드 파싱이 끝나면 현재 선택 Check의 결과를 전체 파싱 결과로 즉시 교체합니다. 배치 추가와 전체 결과 교체 전후에 `(kind, ordinal)` 안정 키로 다중 선택/current row/스크롤 위치를 복원합니다.
+- `Open Coords Only…` — 왼쪽 Check 표와 오른쪽 단일 `Coords` 열을 표시한다.
+- `Open All Params…` — 왼쪽 Tree와 태그 Key별 Results 열을 표시한다.
 
-**최종 보관 자료구조는 `Parser/ascii_rdb.hpp`의 `rdb::Database`입니다.** 선택 Check용 `DetailResult` batch와 Qt `DetailRow`는 전체 파싱 완료 전 화면을 빠르게 채우기 위한 임시 데이터이며, 전체 파싱 완료 후 폐기되고 `rdb::Database::{rule_checks,results,vertices,edges,tagged_values}`를 읽어 TableView를 다시 구성합니다.
+파일을 열면 아래 DockWidget이 열리고 다음 작업이 함께 시작된다.
 
-## 요구사항 대응
+1. `FastCheckIndexParser`가 Check Name/Count 목록을 먼저 완성한다.
+2. Coords Only는 `CheckGeometryParser`, All Params는 `AsciiRdbParser`가 파일 전체를
+   백그라운드에서 읽어 최종 자료구조를 완성한다.
+3. 전체 작업 중 사용자가 Check를 선택하면 해당 Check만 다시 읽고, 10,000 Result씩
+   오른쪽 표에 추가한다. Coords Only는 `CheckGeometryDetailParser`를 사용해 태그를
+   보관하지 않는다.
 
-1. `startIndexParsing()` — RDB Check Index 파싱
-2. `CheckTableModel::setIndex()` — Check TableView 모델 갱신
-3. `startFullBackgroundParsing()` — 모든 Check 상세 결과 백그라운드 파싱
-4. Index 완료 callback의 `selectRow(0)` — 첫 항목 자동 선택
-5. `startSelectedDetailParsing()` — 선택 Check를 10,000개 단위 파싱/갱신
-6. `cancelSelectedDetail()` + `detailRequestId_` — 선택 변경 시 실행 중 작업과 stale batch 취소
-7. `showBackgroundDetail()` — 전체 파싱 완료 즉시 현재 상세 테이블 교체, 선택 유지
+새 파일을 열거나 선택을 바꾸면 이전 작업을 cancellation token과 요청 번호로 폐기한다.
+모델을 배치 추가 또는 전체 자료로 교체할 때는 Result 안정 키, 현재 행, 다중 선택,
+스크롤 위치를 복원한다.
 
-## 빌드와 실행
+## All Params Tree 그룹화
+
+초기 Tree는 `Check Name`만 기준으로 묶으며, 같은 이름의 Check는 한 노드와 합산 Count로
+표시한다. 전체 파싱이 끝나면 Tree 헤더를 우클릭해 grouping depth 1~3을 설정할 수 있다.
+후보는 `Check Name`과 RDB에서 발견한 Tagged Value의 **Key**뿐이다. 이미 다른 depth에
+선택한 기준은 비활성화되어 중복 선택할 수 없다.
+
+태그 Key를 선택하면 실제 태그 Value가 Tree 노드가 된다. 노드를 선택하면 현재까지의
+모든 Tree 조건을 만족하는 Result만 오른쪽 표에 표시한다. Tree 하단 검색은 대소문자를
+무시한 정확 일치 BFS 검색이며 Prev/Next에서 순환한다.
+
+## 빌드
 
 ```bash
 cmake -S . -B build -DCMAKE_BUILD_TYPE=Release \
@@ -31,13 +44,5 @@ ctest --test-dir build --output-on-failure
 ./build/examples/qt_rdb_viewer/qt-rdb-viewer standard_sample.rdb
 ```
 
-Qt 6의 Core, Widgets, Concurrent, Test 모듈이 필요합니다. GUI 없는 CI에서는 테스트가 `QT_QPA_PLATFORM=offscreen`으로 실행됩니다.
-
-## 핵심 동시성 규칙
-
-- worker는 Qt model/view를 직접 만지지 않습니다. `QMetaObject::invokeMethod(..., Qt::QueuedConnection)`로 GUI thread에 batch를 전달합니다.
-- index/full/selected worker는 모두 atomic cancellation token을 확인합니다. 새 파일을 열면 이전 파일의 세 작업을 모두 취소합니다.
-- viewer destructor는 token을 올린 뒤 자체 worker task가 callback enqueue를 끝낼 때까지 join하므로 `QPointer` null 확인과 `invokeMethod()` 사이의 QObject lifetime race가 없습니다.
-- cancellation token은 `std::atomic_bool`입니다. 파서는 결과/좌표/태그/입력 줄 루프에서 이를 확인합니다.
-- cancellation과 별개로 file generation/request ID를 확인하므로, 이미 event queue에 들어온 이전 파일/이전 선택 결과가 새 테이블에 섞이지 않습니다.
-- 전체 DB는 worker 완료 후 `shared_ptr` 소유권으로 GUI thread에 전달하며 이후 읽기 전용으로 사용합니다.
+명령행으로 파일을 넘긴 경우에는 Coords Only로 연다. All Params는 File 메뉴의 전용 동작을
+사용한다.
