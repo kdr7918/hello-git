@@ -27,7 +27,6 @@ class QStackedWidget;
 class QTableView;
 class QTreeView;
 
-template <typename T> class QFutureWatcher;
 struct RdbViewerAsyncState;
 
 struct GroupingDimension {

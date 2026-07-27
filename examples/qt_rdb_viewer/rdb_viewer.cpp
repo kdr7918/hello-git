@@ -4,7 +4,6 @@
 #include <QCoreApplication>
 #include <QDockWidget>
 #include <QFileDialog>
-#include <QFutureWatcher>
 #include <QHeaderView>
 #include <QHBoxLayout>
 #include <QItemSelectionModel>
@@ -23,7 +22,6 @@
 #include <QTableView>
 #include <QTreeView>
 #include <QVBoxLayout>
-#include <QtConcurrent>
 
 #include <algorithm>
 #include <condition_variable>
@@ -33,6 +31,7 @@
 #include <mutex>
 #include <set>
 #include <stdexcept>
+#include <thread>
 
 struct RdbViewerAsyncState {
     RdbViewerAsyncState() : activeTasks(0) {}
@@ -67,7 +66,15 @@ private:
 
 const QEvent::Type indexProgressEventType =
     static_cast<QEvent::Type>(QEvent::registerEventType());
+const QEvent::Type indexReadyEventType =
+    static_cast<QEvent::Type>(QEvent::registerEventType());
+const QEvent::Type geometryReadyEventType =
+    static_cast<QEvent::Type>(QEvent::registerEventType());
+const QEvent::Type databaseReadyEventType =
+    static_cast<QEvent::Type>(QEvent::registerEventType());
 const QEvent::Type detailRowsEventType =
+    static_cast<QEvent::Type>(QEvent::registerEventType());
+const QEvent::Type detailCompleteEventType =
     static_cast<QEvent::Type>(QEvent::registerEventType());
 
 class IndexProgressEvent : public QEvent {
@@ -76,6 +83,39 @@ public:
         : QEvent(indexProgressEventType), generation(generationValue), progress(progressValue) {}
     quint64 generation;
     int progress;
+};
+
+class IndexReadyEvent : public QEvent {
+public:
+    IndexReadyEvent(quint64 generationValue,
+                    const std::shared_ptr<rdb::CheckIndexDatabase>& value,
+                    const std::exception_ptr& exception)
+        : QEvent(indexReadyEventType), generation(generationValue), index(value), error(exception) {}
+    quint64 generation;
+    std::shared_ptr<rdb::CheckIndexDatabase> index;
+    std::exception_ptr error;
+};
+
+class GeometryReadyEvent : public QEvent {
+public:
+    GeometryReadyEvent(quint64 generationValue,
+                       const std::shared_ptr<rdb::GeometryDatabase>& value,
+                       const std::exception_ptr& exception)
+        : QEvent(geometryReadyEventType), generation(generationValue), database(value), error(exception) {}
+    quint64 generation;
+    std::shared_ptr<rdb::GeometryDatabase> database;
+    std::exception_ptr error;
+};
+
+class DatabaseReadyEvent : public QEvent {
+public:
+    DatabaseReadyEvent(quint64 generationValue,
+                       const std::shared_ptr<rdb::Database>& value,
+                       const std::exception_ptr& exception)
+        : QEvent(databaseReadyEventType), generation(generationValue), database(value), error(exception) {}
+    quint64 generation;
+    std::shared_ptr<rdb::Database> database;
+    std::exception_ptr error;
 };
 
 class DetailRowsEvent : public QEvent {
@@ -93,6 +133,23 @@ struct DetailTaskResult {
     std::size_t parsed;
     bool completed;
     DetailTaskResult() : parsed(0), completed(false) {}
+};
+
+class DetailCompleteEvent : public QEvent {
+public:
+    DetailCompleteEvent(quint64 generationValue,
+                        quint64 requestValue,
+                        const DetailTaskResult& value,
+                        const std::exception_ptr& exception)
+        : QEvent(detailCompleteEventType),
+          generation(generationValue),
+          request(requestValue),
+          result(value),
+          error(exception) {}
+    quint64 generation;
+    quint64 request;
+    DetailTaskResult result;
+    std::exception_ptr error;
 };
 
 QString pointText(const rdb::Point& point) {
@@ -282,11 +339,93 @@ bool RdbViewer::event(QEvent* event) {
         if (progress->generation == fileGeneration_) indexProgress_->setValue(progress->progress);
         return true;
     }
+    if (event->type() == indexReadyEventType) {
+        IndexReadyEvent* ready = static_cast<IndexReadyEvent*>(event);
+        if (ready->generation != fileGeneration_) return true;
+        if (ready->error) {
+            try {
+                std::rethrow_exception(ready->error);
+            } catch (const rdb::ScanCancelled&) {
+            } catch (const std::exception& error) {
+                reportError(tr("RDB index error"), error);
+            }
+            return true;
+        }
+        checkModel_->setIndex(*ready->index);
+        indexProgress_->setValue(100);
+        if (mode_ == RdbViewerMode::AllParameters && !fullDatabase_) rebuildIndexTree(true);
+        statusLabel_->setText(tr("Check index ready: %1").arg(checkModel_->rowCount()));
+        if (mode_ == RdbViewerMode::CoordinatesOnly && checkModel_->rowCount() > 0) {
+            const QModelIndex first = checkModel_->index(0, 0);
+            checkView_->selectionModel()->setCurrentIndex(
+                first, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        } else if (mode_ == RdbViewerMode::AllParameters && treeModel_->rowCount() > 0) {
+            const QModelIndex first = treeModel_->index(0, 0);
+            treeView_->selectionModel()->setCurrentIndex(
+                first, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
+        }
+        return true;
+    }
+    if (event->type() == geometryReadyEventType) {
+        GeometryReadyEvent* ready = static_cast<GeometryReadyEvent*>(event);
+        if (ready->generation != fileGeneration_) return true;
+        if (ready->error) {
+            try {
+                std::rethrow_exception(ready->error);
+            } catch (const rdb::GeometryParseCancelled&) {
+            } catch (const std::exception& error) {
+                reportError(tr("RDB coordinate parse error"), error);
+            }
+            return true;
+        }
+        geometryDatabase_ = ready->database;
+        cancelSelectedDetail();
+        ++detailRequestId_;
+        statusLabel_->setText(tr("Coordinate background parsing complete"));
+        showBackgroundDetail();
+        return true;
+    }
+    if (event->type() == databaseReadyEventType) {
+        DatabaseReadyEvent* ready = static_cast<DatabaseReadyEvent*>(event);
+        if (ready->generation != fileGeneration_) return true;
+        if (ready->error) {
+            try {
+                std::rethrow_exception(ready->error);
+            } catch (const rdb::ParseCancelled&) {
+            } catch (const std::exception& error) {
+                reportError(tr("Full RDB parse error"), error);
+            }
+            return true;
+        }
+        fullDatabase_ = ready->database;
+        cancelSelectedDetail();
+        ++detailRequestId_;
+        rebuildFullTree(true);
+        statusLabel_->setText(tr("Full background parsing complete"));
+        showBackgroundDetail();
+        return true;
+    }
     if (event->type() == detailRowsEventType) {
         DetailRowsEvent* rows = static_cast<DetailRowsEvent*>(event);
         if (rows->generation == fileGeneration_ && rows->request == detailRequestId_) {
             appendDetailRowsPreservingSelection(rows->rows);
             statusLabel_->setText(tr("Selected results loading: %1").arg(detailModel_->rowCount()));
+        }
+        return true;
+    }
+    if (event->type() == detailCompleteEventType) {
+        DetailCompleteEvent* complete = static_cast<DetailCompleteEvent*>(event);
+        if (complete->generation != fileGeneration_ || complete->request != detailRequestId_) return true;
+        if (complete->error) {
+            try {
+                std::rethrow_exception(complete->error);
+            } catch (const std::exception& error) {
+                reportError(tr("Selected result parse error"), error);
+            }
+            return true;
+        }
+        if (complete->result.completed) {
+            statusLabel_->setText(tr("Selected results complete: %1").arg(complete->result.parsed));
         }
         return true;
     }
@@ -305,115 +444,72 @@ void RdbViewer::startIndexParsing(quint64 fileGeneration) {
     const std::shared_ptr<RdbViewerAsyncState> asyncState = asyncState_;
     RdbViewer* const receiver = this;
     asyncState->start();
-    QFutureWatcher<std::shared_ptr<rdb::CheckIndexDatabase> >* watcher =
-        new QFutureWatcher<std::shared_ptr<rdb::CheckIndexDatabase> >(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, fileGeneration]() {
-        try {
-            const std::shared_ptr<rdb::CheckIndexDatabase> index = watcher->future().result();
-            if (fileGeneration == fileGeneration_) {
-                checkModel_->setIndex(*index);
-                indexProgress_->setValue(100);
-                if (mode_ == RdbViewerMode::AllParameters && !fullDatabase_) rebuildIndexTree(true);
-                statusLabel_->setText(tr("Check index ready: %1").arg(checkModel_->rowCount()));
-                if (mode_ == RdbViewerMode::CoordinatesOnly && checkModel_->rowCount() > 0) {
-                    const QModelIndex first = checkModel_->index(0, 0);
-                    checkView_->selectionModel()->setCurrentIndex(
-                        first, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-                } else if (mode_ == RdbViewerMode::AllParameters && treeModel_->rowCount() > 0) {
-                    const QModelIndex first = treeModel_->index(0, 0);
-                    treeView_->selectionModel()->setCurrentIndex(
-                        first, QItemSelectionModel::ClearAndSelect | QItemSelectionModel::Rows);
-                }
-            }
-        } catch (const rdb::ScanCancelled&) {
-        } catch (const std::exception& error) {
-            if (fileGeneration == fileGeneration_) reportError(tr("RDB index error"), error);
-        }
-        watcher->deleteLater();
-    });
-    watcher->setFuture(QtConcurrent::run([path, fileGeneration, receiver, cancellation, asyncState]() {
+    std::thread([path, fileGeneration, receiver, cancellation, asyncState]() {
         AsyncTaskGuard guard(asyncState);
-        rdb::FastCheckIndexOptions options;
-        options.is_cancelled = [cancellation]() {
-            return cancellation->load(std::memory_order_relaxed);
-        };
-        options.progress_callback = [fileGeneration, receiver, cancellation](int value) {
-            if (!cancellation->load(std::memory_order_relaxed)) {
-                QCoreApplication::postEvent(receiver, new IndexProgressEvent(fileGeneration, value));
-            }
-        };
-        rdb::FastCheckIndexParser parser;
-        return std::make_shared<rdb::CheckIndexDatabase>(
-            parser.parse_database(path.toStdString(), options));
-    }));
+        std::shared_ptr<rdb::CheckIndexDatabase> index;
+        std::exception_ptr error;
+        try {
+            rdb::FastCheckIndexOptions options;
+            options.is_cancelled = [cancellation]() {
+                return cancellation->load(std::memory_order_relaxed);
+            };
+            options.progress_callback = [fileGeneration, receiver, cancellation](int value) {
+                if (!cancellation->load(std::memory_order_relaxed)) {
+                    QCoreApplication::postEvent(receiver, new IndexProgressEvent(fileGeneration, value));
+                }
+            };
+            rdb::FastCheckIndexParser parser;
+            index.reset(new rdb::CheckIndexDatabase(parser.parse_database(path.toStdString(), options)));
+        } catch (...) {
+            error = std::current_exception();
+        }
+        QCoreApplication::postEvent(receiver, new IndexReadyEvent(fileGeneration, index, error));
+    }).detach();
 }
 
 void RdbViewer::startBackgroundParsing(quint64 fileGeneration) {
     const QString path = path_;
     const CancellationToken cancellation = newCancellationToken();
     const std::shared_ptr<RdbViewerAsyncState> asyncState = asyncState_;
+    RdbViewer* const receiver = this;
     if (mode_ == RdbViewerMode::CoordinatesOnly) {
         asyncState->start();
-        QFutureWatcher<std::shared_ptr<rdb::GeometryDatabase> >* watcher =
-            new QFutureWatcher<std::shared_ptr<rdb::GeometryDatabase> >(this);
-        connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, fileGeneration]() {
-            try {
-                const std::shared_ptr<rdb::GeometryDatabase> database = watcher->future().result();
-                if (fileGeneration == fileGeneration_) {
-                    geometryDatabase_ = database;
-                    cancelSelectedDetail();
-                    ++detailRequestId_;
-                    statusLabel_->setText(tr("Coordinate background parsing complete"));
-                    showBackgroundDetail();
-                }
-            } catch (const rdb::GeometryParseCancelled&) {
-            } catch (const std::exception& error) {
-                if (fileGeneration == fileGeneration_) reportError(tr("RDB coordinate parse error"), error);
-            }
-            watcher->deleteLater();
-        });
-        watcher->setFuture(QtConcurrent::run([path, cancellation, asyncState]() {
+        std::thread([path, fileGeneration, receiver, cancellation, asyncState]() {
             AsyncTaskGuard guard(asyncState);
-            rdb::GeometryParseOptions options;
-            options.is_cancelled = [cancellation]() {
-                return cancellation->load(std::memory_order_relaxed);
-            };
-            rdb::CheckGeometryParser parser;
-            return std::make_shared<rdb::GeometryDatabase>(
-                parser.parse_file(path.toStdString(), options));
-        }));
+            std::shared_ptr<rdb::GeometryDatabase> database;
+            std::exception_ptr error;
+            try {
+                rdb::GeometryParseOptions options;
+                options.is_cancelled = [cancellation]() {
+                    return cancellation->load(std::memory_order_relaxed);
+                };
+                rdb::CheckGeometryParser parser;
+                database.reset(new rdb::GeometryDatabase(parser.parse_file(path.toStdString(), options)));
+            } catch (...) {
+                error = std::current_exception();
+            }
+            QCoreApplication::postEvent(receiver, new GeometryReadyEvent(fileGeneration, database, error));
+        }).detach();
         return;
     }
 
     asyncState->start();
-    QFutureWatcher<std::shared_ptr<rdb::Database> >* watcher =
-        new QFutureWatcher<std::shared_ptr<rdb::Database> >(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, fileGeneration]() {
-        try {
-            const std::shared_ptr<rdb::Database> database = watcher->future().result();
-            if (fileGeneration == fileGeneration_) {
-                fullDatabase_ = database;
-                cancelSelectedDetail();
-                ++detailRequestId_;
-                rebuildFullTree(true);
-                statusLabel_->setText(tr("Full background parsing complete"));
-                showBackgroundDetail();
-            }
-        } catch (const rdb::ParseCancelled&) {
-        } catch (const std::exception& error) {
-            if (fileGeneration == fileGeneration_) reportError(tr("Full RDB parse error"), error);
-        }
-        watcher->deleteLater();
-    });
-    watcher->setFuture(QtConcurrent::run([path, cancellation, asyncState]() {
+    std::thread([path, fileGeneration, receiver, cancellation, asyncState]() {
         AsyncTaskGuard guard(asyncState);
-        rdb::ParseOptions options;
-        options.is_cancelled = [cancellation]() {
-            return cancellation->load(std::memory_order_relaxed);
-        };
-        rdb::AsciiRdbParser parser;
-        return std::make_shared<rdb::Database>(parser.parse_file(path.toStdString(), options));
-    }));
+        std::shared_ptr<rdb::Database> database;
+        std::exception_ptr error;
+        try {
+            rdb::ParseOptions options;
+            options.is_cancelled = [cancellation]() {
+                return cancellation->load(std::memory_order_relaxed);
+            };
+            rdb::AsciiRdbParser parser;
+            database.reset(new rdb::Database(parser.parse_file(path.toStdString(), options)));
+        } catch (...) {
+            error = std::current_exception();
+        }
+        QCoreApplication::postEvent(receiver, new DatabaseReadyEvent(fileGeneration, database, error));
+    }).detach();
 }
 
 void RdbViewer::showSelectedCheckRow(int row) {
@@ -465,27 +561,13 @@ void RdbViewer::startSelectedDetailParsing(const QVector<int>& rows, quint64 req
     selectedCancellation_ = cancellation;
     asyncState->start();
 
-    QFutureWatcher<DetailTaskResult>* watcher = new QFutureWatcher<DetailTaskResult>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, watcher, fileGeneration, requestId]() {
+    std::thread([path, rows, index, mode, fileGeneration, requestId, cancellation, receiver, asyncState]() {
+        AsyncTaskGuard guard(asyncState);
+        DetailTaskResult outcome;
+        std::exception_ptr error;
         try {
-            const DetailTaskResult outcome = watcher->future().result();
-            if (fileGeneration == fileGeneration_ && requestId == detailRequestId_ && outcome.completed) {
-                statusLabel_->setText(tr("Selected results complete: %1").arg(outcome.parsed));
-            }
-        } catch (const std::exception& error) {
-            if (fileGeneration == fileGeneration_ && requestId == detailRequestId_) {
-                reportError(tr("Selected result parse error"), error);
-            }
-        }
-        watcher->deleteLater();
-    });
-
-    watcher->setFuture(QtConcurrent::run(
-        [path, rows, index, mode, fileGeneration, requestId, cancellation, receiver, asyncState]() {
-            AsyncTaskGuard guard(asyncState);
-            DetailTaskResult outcome;
             for (int position = 0; position < rows.size(); ++position) {
-                if (cancellation->load(std::memory_order_relaxed)) return outcome;
+                if (cancellation->load(std::memory_order_relaxed)) break;
                 const int row = rows.at(position);
                 if (row < 0 || static_cast<std::size_t>(row) >= index.checks.size()) continue;
                 const rdb::CheckIndexEntry& entry = index.checks[static_cast<std::size_t>(row)];
@@ -507,7 +589,7 @@ void RdbViewer::startSelectedDetailParsing(const QVector<int>& rows, quint64 req
                     const rdb::GeometryDetailBatchResult parsed =
                         parser.parse_file_at_batches(path.toStdString(), entry.offset, options);
                     outcome.parsed += parsed.parsed_result_count;
-                    if (!parsed.completed) return outcome;
+                    if (!parsed.completed) break;
                 } else {
                     rdb::CheckDetailBatchOptions options;
                     options.batch_size = 10000U;
@@ -526,12 +608,16 @@ void RdbViewer::startSelectedDetailParsing(const QVector<int>& rows, quint64 req
                     const rdb::CheckDetailBatchResult parsed =
                         parser.parse_file_at_batches(path.toStdString(), entry.offset, options);
                     outcome.parsed += parsed.parsed_result_count;
-                    if (!parsed.completed) return outcome;
+                    if (!parsed.completed) break;
                 }
             }
-            outcome.completed = true;
-            return outcome;
-        }));
+            outcome.completed = !cancellation->load(std::memory_order_relaxed);
+        } catch (...) {
+            error = std::current_exception();
+        }
+        QCoreApplication::postEvent(
+            receiver, new DetailCompleteEvent(fileGeneration, requestId, outcome, error));
+    }).detach();
 }
 
 void RdbViewer::showBackgroundDetail() {

@@ -1,11 +1,12 @@
 # Qt 5.9 API만 사용한다. 개발 환경에 Qt 5가 없을 때만 Qt 6로 호환성 빌드한다.
-find_package(Qt5 QUIET COMPONENTS Core Widgets Concurrent Test)
+find_package(Qt5 QUIET COMPONENTS Core Widgets Test)
 if(Qt5_FOUND)
     set(RDB_QT_PACKAGE Qt5)
 else()
-    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Concurrent Test)
+    find_package(Qt6 REQUIRED COMPONENTS Core Widgets Test)
     set(RDB_QT_PACKAGE Qt6)
 endif()
+find_package(Threads REQUIRED)
 
 set(CMAKE_AUTOMOC ON)
 
@@ -18,9 +19,9 @@ add_executable(qt-rdb-viewer
 )
 target_link_libraries(qt-rdb-viewer PRIVATE
     ascii_rdb_parser
+    Threads::Threads
     ${RDB_QT_PACKAGE}::Core
     ${RDB_QT_PACKAGE}::Widgets
-    ${RDB_QT_PACKAGE}::Concurrent
 )
 target_compile_options(qt-rdb-viewer PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>
@@ -53,9 +54,9 @@ if(BUILD_TESTING)
     )
     target_link_libraries(qt-rdb-viewer-integration-tests PRIVATE
         ascii_rdb_parser
+        Threads::Threads
         ${RDB_QT_PACKAGE}::Core
         ${RDB_QT_PACKAGE}::Widgets
-        ${RDB_QT_PACKAGE}::Concurrent
         ${RDB_QT_PACKAGE}::Test
     )
     target_compile_definitions(qt-rdb-viewer-integration-tests PRIVATE
