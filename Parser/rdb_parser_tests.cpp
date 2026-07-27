@@ -77,6 +77,16 @@ const rdb::Result& result(const rdb::Database& database,
 int main() {
     const rdb::AsciiRdbParser parser;
 
+    rdb::ParseOptions full_cancel_options;
+    full_cancel_options.is_cancelled = []() { return true; };
+    bool full_parse_cancelled = false;
+    try {
+        parser.parse_file(sample_path("large_standard_sample.rdb"), full_cancel_options);
+    } catch (const rdb::ParseCancelled&) {
+        full_parse_cancelled = true;
+    }
+    RDB_CHECK(full_parse_cancelled);
+
     const rdb::Database standard = parser.parse_file(sample_path("standard_sample.rdb"));
     RDB_CHECK(text(standard, standard.top_cell_name) == "TOP_CHIP");
     RDB_CHECK(standard.database_precision == 1000);
@@ -120,6 +130,16 @@ int main() {
     RDB_CHECK(large_post_geometry.edges.size() == 200);
 
     const rdb::FastCheckIndexParser index_parser;
+
+    rdb::FastCheckIndexOptions index_cancel_options;
+    index_cancel_options.is_cancelled = []() { return true; };
+    bool index_parse_cancelled = false;
+    try {
+        index_parser.parse_database(sample_path("large_standard_sample.rdb"), index_cancel_options);
+    } catch (const rdb::ScanCancelled&) {
+        index_parse_cancelled = true;
+    }
+    RDB_CHECK(index_parse_cancelled);
 
     // 1차 scan과 comment pread 사이의 동일-size 파일 변경도 감지해야 한다.
     const TemporaryRdb file_state_fixture("TOP 0.001\n");
@@ -423,6 +443,49 @@ int main() {
         index_parser.parse_file(sample_path("post_coordinate_tags_sample.rdb"))[0].offset);
     RDB_CHECK(extended_check.results[0].properties_after_geometry.size() == 2);
     RDB_CHECK(extended_check.results[1].properties_after_geometry.size() == 3);
+
+    // Qt TableView용 배치 파서는 정확히 batch_size개마다 결과를 전달하고 마지막 잔여분도 보낸다.
+    std::string batched_contents = "TOP 1000\nBATCH.CHECK\n20001 20001 0 Jul 27 12:10:49 2026\n";
+    for (std::size_t i = 0; i < 20001U; ++i) {
+        batched_contents += "p " + std::to_string(i + 1U) + " 1\n";
+        batched_contents += std::to_string(i) + " " + std::to_string(i + 1U) + "\n";
+    }
+    const TemporaryRdb batched_file(batched_contents);
+    const rdb::CheckOffset batched_offset =
+        index_parser.parse_file(batched_file.path())[0].offset;
+    std::vector<std::size_t> batch_sizes;
+    rdb::CheckDetailBatchOptions batch_options;
+    batch_options.batch_size = 10000U;
+    batch_options.batch_callback = [&batch_sizes](const std::vector<rdb::DetailResult>& batch) {
+        batch_sizes.push_back(batch.size());
+    };
+    const rdb::CheckDetailBatchResult batched =
+        detail_parser.parse_file_at_batches(batched_file.path(), batched_offset, batch_options);
+    RDB_CHECK(batched.completed);
+    RDB_CHECK(batched.parsed_result_count == 20001U);
+    RDB_CHECK(batched.detail.name == "BATCH.CHECK");
+    RDB_CHECK(batched.detail.results.empty());
+    RDB_CHECK(batch_sizes.size() == 3U);
+    RDB_CHECK(batch_sizes[0] == 10000U);
+    RDB_CHECK(batch_sizes[1] == 10000U);
+    RDB_CHECK(batch_sizes[2] == 1U);
+
+    // 선택 변경 시 cancellation callback이 true가 되면 기존 파싱은 다음 결과 전에 중단한다.
+    bool cancel_requested = false;
+    std::size_t delivered_before_cancel = 0;
+    rdb::CheckDetailBatchOptions cancel_options;
+    cancel_options.batch_size = 100U;
+    cancel_options.is_cancelled = [&cancel_requested]() { return cancel_requested; };
+    cancel_options.batch_callback = [&cancel_requested, &delivered_before_cancel](
+        const std::vector<rdb::DetailResult>& batch) {
+        delivered_before_cancel += batch.size();
+        cancel_requested = true;
+    };
+    const rdb::CheckDetailBatchResult cancelled =
+        detail_parser.parse_file_at_batches(batched_file.path(), batched_offset, cancel_options);
+    RDB_CHECK(!cancelled.completed);
+    RDB_CHECK(cancelled.parsed_result_count == 100U);
+    RDB_CHECK(delivered_before_cancel == 100U);
 
     const rdb::CheckGeometryParser geometry_parser;
     const rdb::GeometryDatabase geometry = geometry_parser.parse_file(sample_path("standard_sample.rdb"));

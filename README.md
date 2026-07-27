@@ -134,6 +134,7 @@ coordinate parser when a nonstandard file must be structurally interpreted.
 ## Repository layout
 
 - `examples/python_log_keyword_counter/` — 날짜 범위별 로그 4번째 줄 키워드 카운터 예제
+- `examples/qt_rdb_viewer/` — Qt 6 TableView + 백그라운드/배치/cancellation GUI 예제
 - `Parser/ascii_rdb.hpp` — compact public data model
 - `Parser/ascii_rdb_parser.hpp/.cpp` — full one-pass parser
 - `Parser/rdb_check_index.hpp` — buffered `memchr(':')` fast name/offset/result-count indexer

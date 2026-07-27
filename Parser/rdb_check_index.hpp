@@ -41,6 +41,11 @@ private:
     CheckOffset offset_;
 };
 
+class ScanCancelled : public std::runtime_error {
+public:
+    ScanCancelled() : std::runtime_error("RDB scan cancelled") {}
+};
+
 // TreeView의 한 행에 바로 사용할 수 있는 정보와 header 뒤 comment를 보관한다.
 // geometry_count는 좌표 점 개수가 아니라 p/e 결과(결함 도형) 레코드 개수다.
 struct CheckIndexEntry {
@@ -68,16 +73,19 @@ struct CheckIndexDatabase {
  * progress_callback은 중복 없는 단조 증가 정수(0~100)를 전달하며, 100은 완료 후에만 전달한다.
  */
 typedef std::function<void(int)> FastCheckIndexProgressCallback;
+typedef std::function<bool()> FastCheckIndexCancellationCallback;
 
 struct FastCheckIndexOptions {
     std::size_t read_buffer_bytes;
     std::size_t context_bytes;
     FastCheckIndexProgressCallback progress_callback;
+    FastCheckIndexCancellationCallback is_cancelled;
 
     FastCheckIndexOptions()
         : read_buffer_bytes(16U * 1024U * 1024U),
           context_bytes(64U * 1024U),
-          progress_callback() {}
+          progress_callback(),
+          is_cancelled() {}
 };
 
 namespace detail {
@@ -568,6 +576,7 @@ public:
         : fd_(-1),
           initial_state_(),
           progress_callback_(options.progress_callback),
+          cancellation_callback_(options.is_cancelled),
           last_progress_(-1),
           context_bytes_(options.context_bytes),
           buffer_offset_(0),
@@ -602,6 +611,7 @@ public:
     }
 
     CheckIndexDatabase run() {
+        check_cancelled();
         report_progress(0);
         CheckIndexDatabase database;
         std::vector<CheckCommentRequest> comment_requests;
@@ -612,6 +622,7 @@ public:
         const std::size_t lookahead_bytes = 7U; // HH:MM:SS 뒤 문자까지 확인할 수 있는 최소 여유
 
         for (;;) {
+            check_cancelled();
             const ssize_t received = read_block(&buffer_[carried], buffer_.size() - carried);
             const bool eof = received == 0;
             const std::size_t total = carried + (received > 0 ? static_cast<std::size_t>(received) : 0U);
@@ -670,11 +681,16 @@ public:
         report_progress(90);
         populate_comments(database, comment_requests);
         verify_file_unchanged();
+        check_cancelled();
         report_progress(100);
         return database;
     }
 
 private:
+    void check_cancelled() const {
+        if (cancellation_callback_ && cancellation_callback_()) throw ScanCancelled();
+    }
+
     void report_progress(int value) const {
         if (!progress_callback_) return;
         if (value < 0) value = 0;
@@ -794,6 +810,7 @@ private:
         std::string line;
 
         for (;;) {
+            check_cancelled();
             const ssize_t received = pread_block(&block[0], block.size(), offset);
             if (received == 0) {
                 if (!line.empty() &&
@@ -827,6 +844,7 @@ private:
         CheckOffset comments_end = 0;
 
         for (std::size_t request_index = 0; request_index < requests.size(); ++request_index) {
+            check_cancelled();
             const CheckCommentRequest& request = requests[request_index];
             CheckIndexEntry& raw_entry = database.checks[request.check_index];
             if (raw_entry.offset < comments_end) {
@@ -888,6 +906,7 @@ private:
     int fd_;
     FileState initial_state_;
     FastCheckIndexProgressCallback progress_callback_;
+    FastCheckIndexCancellationCallback cancellation_callback_;
     mutable int last_progress_;
     std::vector<char> buffer_;
     std::size_t context_bytes_;

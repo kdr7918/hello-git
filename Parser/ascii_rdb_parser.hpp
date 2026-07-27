@@ -5,6 +5,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <stdexcept>
 #include <string>
 
@@ -26,17 +27,27 @@ private:
     std::uint64_t line_;
 };
 
+class ParseCancelled : public std::runtime_error {
+public:
+    ParseCancelled() : std::runtime_error("RDB parsing cancelled") {}
+};
+
+typedef std::function<bool()> ParseCancellationCallback;
+
 struct ParseOptions {
     // 운영체제 read() 한 번에 읽을 버퍼 크기와, 비정상적으로 긴 한 줄의 허용 한계다.
     std::size_t read_buffer_bytes;
     std::size_t max_line_bytes;
     // 표준 위치 외에 좌표 뒤에 태그가 붙는 확장 형식도 허용할지 정한다.
     bool allow_properties_after_geometry;
+    // true를 반환하면 ParseCancelled를 던져 현재 전체 파싱을 중단한다.
+    ParseCancellationCallback is_cancelled;
 
     ParseOptions()
         : read_buffer_bytes(16U * 1024U * 1024U),
           max_line_bytes(64U * 1024U * 1024U),
-          allow_properties_after_geometry(true) {}
+          allow_properties_after_geometry(true),
+          is_cancelled() {}
 };
 
 /*

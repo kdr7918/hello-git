@@ -3,6 +3,8 @@
 
 #include "rdb_check_index.hpp"
 
+#include <functional>
+#include <stdexcept>
 #include <string>
 #include <utility>
 #include <vector>
@@ -41,6 +43,28 @@ struct CheckDetail {
 
     CheckDetail()
         : offset(0), current_result_count(0), original_result_count(0) {}
+};
+
+// 선택 Check를 TableView에 점진적으로 표시하기 위한 배치 파싱 설정이다.
+// callback이 받은 vector 참조는 callback이 반환할 때까지만 유효하다.
+typedef std::function<void(const std::vector<DetailResult>&)> CheckDetailBatchCallback;
+typedef std::function<bool()> CheckDetailCancellationCallback;
+
+struct CheckDetailBatchOptions {
+    std::size_t batch_size;
+    CheckDetailBatchCallback batch_callback;
+    CheckDetailCancellationCallback is_cancelled;
+
+    CheckDetailBatchOptions() : batch_size(10000U) {}
+};
+
+struct CheckDetailBatchResult {
+    // detail에는 Check header/text만 들어 있고 results는 배치 callback으로만 전달된다.
+    CheckDetail detail;
+    std::size_t parsed_result_count;
+    bool completed;
+
+    CheckDetailBatchResult() : parsed_result_count(0), completed(false) {}
 };
 
 namespace detail {
@@ -223,6 +247,189 @@ inline CheckDetail parse_check_detail(const MappedFile& file, CheckOffset offset
     return check;
 }
 
+inline bool detail_parse_cancelled(const CheckDetailCancellationCallback& callback) {
+    return callback && callback();
+}
+
+inline bool consume_detail_geometry_cancellable(
+    LineCursor& cursor,
+    const ResultSignature& signature,
+    DetailResult& result,
+    const CheckDetailCancellationCallback& is_cancelled) {
+    std::uint64_t seen = 0;
+    while (seen < signature.coordinate_count) {
+        if (detail_parse_cancelled(is_cancelled)) return false;
+        Line line;
+        if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated result geometry");
+        const Span text = trim(line.text);
+        if (text.empty()) continue;
+
+        if (signature.kind == ResultKind::Polygon) {
+            Point point;
+            if (parse_point(text, point)) {
+                result.vertices.push_back(point);
+                ++seen;
+                continue;
+            }
+        } else {
+            Edge edge;
+            if (parse_edge(text, edge)) {
+                result.edges.push_back(edge);
+                ++seen;
+                continue;
+            }
+        }
+
+        ResultSignature unexpected;
+        if (parse_result_signature(text, unexpected)) {
+            throw ScanError(line.offset, "result ended before its declared coordinate count");
+        }
+        result.properties_before_geometry.push_back(parse_detail_tag(text));
+    }
+    return true;
+}
+
+inline bool consume_detail_intermediate_tail_cancellable(
+    LineCursor& cursor,
+    DetailResult& result,
+    const CheckDetailCancellationCallback& is_cancelled) {
+    for (;;) {
+        if (detail_parse_cancelled(is_cancelled)) return false;
+        const char* const mark = cursor.mark();
+        Line line;
+        if (!next_nonblank(cursor, line)) {
+            throw ScanError(cursor.position(), "result count exceeds physical result list");
+        }
+        ResultSignature next;
+        if (parse_result_signature(trim(line.text), next)) {
+            cursor.reset(mark);
+            return true;
+        }
+        result.properties_after_geometry.push_back(parse_detail_tag(trim(line.text)));
+    }
+}
+
+inline bool consume_detail_final_tail_cancellable(
+    LineCursor& cursor,
+    DetailResult& result,
+    const CheckDetailCancellationCallback& is_cancelled) {
+    bool have_candidate = false;
+    Line candidate;
+    for (;;) {
+        if (detail_parse_cancelled(is_cancelled)) return false;
+        if (!have_candidate && !next_nonblank(cursor, candidate)) return true;
+        have_candidate = false;
+
+        ResultSignature extra;
+        if (parse_result_signature(trim(candidate.text), extra)) {
+            throw ScanError(candidate.offset, "physical result list exceeds result count in rule header");
+        }
+
+        Line possible_header;
+        if (!next_nonblank(cursor, possible_header)) {
+            result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
+            return true;
+        }
+
+        RuleHeader next_header;
+        if (parse_rule_header(trim(possible_header.text), next_header)) return true;
+        result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
+        candidate = possible_header;
+        have_candidate = true;
+    }
+}
+
+inline CheckDetailBatchResult parse_check_detail_batches(
+    const MappedFile& file,
+    CheckOffset offset,
+    const CheckDetailBatchOptions& options) {
+    if (options.batch_size == 0U) {
+        throw std::invalid_argument("Check detail batch size must be greater than zero");
+    }
+    if (!options.batch_callback) {
+        throw std::invalid_argument("Check detail batch callback is required");
+    }
+
+    CheckDetailBatchResult outcome;
+    if (detail_parse_cancelled(options.is_cancelled)) return outcome;
+
+    LineCursor cursor(file, offset);
+    Line name_line;
+    if (!next_nonblank(cursor, name_line)) throw ScanError(offset, "missing rule-check name");
+    Line header_line;
+    if (!cursor.next(header_line)) throw ScanError(cursor.position(), "truncated rule-check header");
+
+    RuleHeader header;
+    const Span header_text = trim(header_line.text);
+    if (!parse_rule_header(header_text, header)) {
+        throw ScanError(header_line.offset, "expected rule-check header");
+    }
+
+    CheckDetail& check = outcome.detail;
+    check.name = as_string(trim(name_line.text));
+    check.offset = name_line.offset;
+    check.current_result_count = header.current_result_count;
+    check.original_result_count = header.original_result_count;
+    Span words = header_text;
+    Span word;
+    for (int i = 0; i < 3; ++i) (void)next_word(words, word);
+    check.executed_at = as_string(trim(words));
+
+    check.check_text.reserve(static_cast<std::size_t>(header.check_text_line_count));
+    for (std::uint64_t i = 0; i < header.check_text_line_count; ++i) {
+        if (detail_parse_cancelled(options.is_cancelled)) return outcome;
+        Line line;
+        if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated check text");
+        check.check_text.push_back(as_string(line.text));
+    }
+
+    std::vector<DetailResult> batch;
+    batch.reserve(options.batch_size);
+    for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
+        if (detail_parse_cancelled(options.is_cancelled)) return outcome;
+        DetailResult result;
+        Line signature_line;
+        ResultSignature signature;
+        bool found = false;
+        while (next_nonblank(cursor, signature_line)) {
+            if (detail_parse_cancelled(options.is_cancelled)) return outcome;
+            if (parse_result_signature(trim(signature_line.text), signature)) {
+                found = true;
+                break;
+            }
+            result.properties_before_geometry.push_back(parse_detail_tag(trim(signature_line.text)));
+        }
+        if (!found) throw ScanError(cursor.position(), "truncated result list");
+
+        result.kind = signature.kind;
+        result.ordinal = signature.ordinal;
+        result.signature_suffix = as_string(signature.suffix);
+        if (signature.kind == ResultKind::Polygon) {
+            result.vertices.reserve(static_cast<std::size_t>(signature.coordinate_count));
+        } else {
+            result.edges.reserve(static_cast<std::size_t>(signature.coordinate_count));
+        }
+        if (!consume_detail_geometry_cancellable(
+                cursor, signature, result, options.is_cancelled)) return outcome;
+
+        const bool tail_complete = i + 1U == header.current_result_count
+            ? consume_detail_final_tail_cancellable(cursor, result, options.is_cancelled)
+            : consume_detail_intermediate_tail_cancellable(cursor, result, options.is_cancelled);
+        if (!tail_complete) return outcome;
+
+        batch.push_back(std::move(result));
+        ++outcome.parsed_result_count;
+        if (batch.size() == options.batch_size) {
+            options.batch_callback(batch);
+            batch.clear();
+        }
+    }
+
+    if (!batch.empty()) options.batch_callback(batch);
+    outcome.completed = true;
+    return outcome;
+}
+
 } // namespace detail
 
 /*
@@ -255,6 +462,14 @@ public:
     CheckDetail parse_file_at(const std::string& path, CheckOffset offset) const {
         detail::MappedFile file(path);
         return detail::parse_check_detail(file, offset);
+    }
+
+    CheckDetailBatchResult parse_file_at_batches(
+        const std::string& path,
+        CheckOffset offset,
+        const CheckDetailBatchOptions& options) const {
+        detail::MappedFile file(path);
+        return detail::parse_check_detail_batches(file, offset, options);
     }
 };
 

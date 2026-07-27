@@ -168,6 +168,7 @@ public:
         : fd_(-1),
           buffer_(options.read_buffer_bytes),
           max_line_bytes_(options.max_line_bytes),
+          cancellation_(options.is_cancelled),
           position_(0),
           available_(0),
           buffer_offset_(0),
@@ -198,11 +199,13 @@ public:
 
     bool next(LineView& line) {
         // 대부분의 줄은 buffer_ 안에 있으므로 메모리 할당 없이 memchr로 '\n'을 찾는다.
+        if (cancellation_ && cancellation_()) throw ParseCancelled();
         overflow_.clear();
         bool has_overflow = false;
         const FileOffset line_offset = position();
 
         for (;;) {
+            if (cancellation_ && cancellation_()) throw ParseCancelled();
             if (position_ == available_) {
                 if (!refill()) {
                     if (!has_overflow) return false;
@@ -278,6 +281,7 @@ private:
     int fd_;
     std::vector<char> buffer_;
     std::size_t max_line_bytes_;
+    ParseCancellationCallback cancellation_;
     std::size_t position_;
     std::size_t available_;
     FileOffset buffer_offset_;
