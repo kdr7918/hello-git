@@ -66,6 +66,10 @@ if (!ids.empty()) {
 }
 ```
 
+전체 예시의 `tagged_keys(database, loaded)` 함수는 Check에 속한 모든 Result의
+`TaggedValue::id`만 `StringId`로 모은다. 문자열을 복사하지 않고 파일 등장 순서와
+중복 key를 유지하며, 실제 key 문자열은 `database.strings.get(id)`로 조회한다.
+
 `load_check()`는 동일 Check에 대해 idempotent하며, `load_all()`은 모든 Check를 같은
 `Database`에 완성한다. Result가 0개인 Check도 `detail_loaded`로 index-only 상태와
 구분한다.
