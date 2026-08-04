@@ -1,8 +1,10 @@
 #ifndef ASCII_RDB_HPP
 #define ASCII_RDB_HPP
 
+#include <cmath>
 #include <cstddef>
 #include <cstdint>
+#include <cstring>
 #include <limits>
 #include <stdexcept>
 #include <string>
@@ -28,6 +30,9 @@ namespace rdb {
 // 32비트로 두어 Result/Range 구조체의 크기를 작게 유지한다.
 typedef std::uint32_t StringId;
 typedef std::uint32_t Index;
+typedef std::uint64_t FileOffset;
+typedef FileOffset CheckOffset;
+typedef Index CheckId;
 
 inline StringId invalid_string_id() {
     // 실제 문자열 ID로는 만들지 않는 가장 큰 값을 "없음" 표시로 사용한다.
@@ -36,6 +41,10 @@ inline StringId invalid_string_id() {
 
 inline Index invalid_index() {
     return std::numeric_limits<Index>::max();
+}
+
+inline CheckId invalid_check_id() {
+    return invalid_index();
 }
 
 // Database 안의 연속 배열 일부를 가리킨다.
@@ -82,7 +91,23 @@ struct StringRecord {
  */
 class StringTable {
 public:
-    StringTable() {}
+    class Checkpoint {
+    public:
+        Checkpoint(const Checkpoint&) = default;
+    private:
+        friend class StringTable;
+        Checkpoint(const StringTable* owner,
+                   std::size_t epoch,
+                   std::size_t string_count,
+                   std::size_t byte_count)
+            : owner_(owner), epoch_(epoch), string_count_(string_count), byte_count_(byte_count) {}
+        const StringTable* owner_;
+        std::size_t epoch_;
+        std::size_t string_count_;
+        std::size_t byte_count_;
+    };
+
+    StringTable() : epoch_(0) {}
 
     void reserve(std::size_t string_count, std::size_t byte_count) {
         // 대략적인 크기를 알 때 미리 확보하면 vector의 재할당 횟수가 줄어든다.
@@ -123,7 +148,23 @@ public:
 
     std::size_t size() const { return records_.size(); }
     std::size_t byte_size() const { return bytes_.size(); }
-    void clear() { records_.clear(); bytes_.clear(); }
+
+    Checkpoint checkpoint() const {
+        return Checkpoint(this, epoch_, records_.size(), bytes_.size());
+    }
+
+    void rollback(const Checkpoint& checkpoint) {
+        if (checkpoint.owner_ != this || checkpoint.epoch_ != epoch_ ||
+            checkpoint.string_count_ > records_.size() ||
+            checkpoint.byte_count_ > bytes_.size()) {
+            throw std::out_of_range("StringTable rollback checkpoint is invalid");
+        }
+        records_.resize(checkpoint.string_count_);
+        bytes_.resize(checkpoint.byte_count_);
+        ++epoch_;
+    }
+
+    void clear() { records_.clear(); bytes_.clear(); ++epoch_; }
 
 private:
     static std::size_t max_index() {
@@ -132,6 +173,7 @@ private:
 
     std::vector<StringRecord> records_;
     std::vector<char> bytes_;
+    std::size_t epoch_;
 };
 
 struct Point {
@@ -187,20 +229,30 @@ struct Result {
           kind(ResultKind::Polygon) {}
 };
 
-// RuleCheck 이름, 헤더, check text, 그리고 p/e 결과 목록을 묶는다.
+// RuleCheck는 index 단계에서 name/comment/offset/count를 채우고, detail load 후 나머지
+// Range와 실행 정보를 같은 객체에 완성한다. detail_loaded는 결과 0개인 loaded Check와
+// 아직 load하지 않은 Check를 구분한다.
 struct RuleCheck {
+    CheckOffset offset;
     StringId name;
+    StringId comment;
     StringId executed_at;
     std::uint32_t current_result_count;
     std::uint32_t original_result_count;
+    std::uint32_t declared_check_text_count;
     Range check_text;
     Range results;
+    bool detail_loaded;
 
     RuleCheck()
-        : name(invalid_string_id()),
+        : offset(0),
+          name(invalid_string_id()),
+          comment(invalid_string_id()),
           executed_at(invalid_string_id()),
           current_result_count(0),
-          original_result_count(0) {}
+          original_result_count(0),
+          declared_check_text_count(0),
+          detail_loaded(false) {}
 };
 
 /*
@@ -214,7 +266,7 @@ struct RuleCheck {
 struct Database {
     StringTable strings;
     StringId top_cell_name;
-    std::int64_t database_precision;
+    double database_precision;
 
     std::vector<RuleCheck> rule_checks;
     std::vector<Result> results;
@@ -222,13 +274,51 @@ struct Database {
     std::vector<Edge> edges;
     std::vector<TaggedValue> tagged_values;
     std::vector<StringId> check_text_lines;
+    std::size_t loaded_rule_check_count;
 
     Database()
         : top_cell_name(invalid_string_id()),
-          database_precision(0) {}
+          database_precision(0.0),
+          loaded_rule_check_count(0) {}
 
     bool has_valid_precision() const {
-        return database_precision > 0;
+        return std::isfinite(database_precision) && database_precision > 0.0;
+    }
+
+    std::size_t check_count() const { return rule_checks.size(); }
+    std::size_t loaded_check_count() const { return loaded_rule_check_count; }
+
+    const RuleCheck& check(CheckId id) const {
+        if (id == invalid_check_id() || static_cast<std::size_t>(id) >= rule_checks.size()) {
+            throw std::out_of_range("RDB check ID is out of range");
+        }
+        return rule_checks[id];
+    }
+
+    RuleCheck& check(CheckId id) {
+        if (id == invalid_check_id() || static_cast<std::size_t>(id) >= rule_checks.size()) {
+            throw std::out_of_range("RDB check ID is out of range");
+        }
+        return rule_checks[id];
+    }
+
+    CheckId find_check_by_offset(CheckOffset offset) const {
+        for (std::size_t i = 0; i < rule_checks.size(); ++i) {
+            if (rule_checks[i].offset == offset) return static_cast<CheckId>(i);
+        }
+        return invalid_check_id();
+    }
+
+    std::vector<CheckId> find_checks(const std::string& name) const {
+        std::vector<CheckId> found;
+        for (std::size_t i = 0; i < rule_checks.size(); ++i) {
+            const StringRef value = strings.get(rule_checks[i].name);
+            if (value.size == name.size() &&
+                (value.size == 0 || std::memcmp(value.data, name.data(), value.size) == 0)) {
+                found.push_back(static_cast<CheckId>(i));
+            }
+        }
+        return found;
     }
 
     void reserve(std::size_t rule_count,

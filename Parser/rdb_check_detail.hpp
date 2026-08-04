@@ -172,6 +172,15 @@ inline void consume_detail_final_tail(LineCursor& cursor, DetailResult& result) 
     }
 }
 
+inline void reject_undeclared_result_after_empty_check(LineCursor& cursor) {
+    Line line;
+    if (!next_nonblank(cursor, line)) return;
+    ResultSignature signature;
+    if (parse_result_signature(trim(line.text), signature)) {
+        throw ScanError(line.offset, "physical result exists although current result count is zero");
+    }
+}
+
 // 실제 상세 파싱 본문이다. MappedFile을 인자로 받아, 일회성 파서와 재사용 세션이 같은
 // 구현을 공유하게 한다.
 inline CheckDetail parse_check_detail(const MappedFile& file, CheckOffset offset) {
@@ -206,6 +215,11 @@ inline CheckDetail parse_check_detail(const MappedFile& file, CheckOffset offset
         Line line;
         if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated check text");
         check.check_text.push_back(as_string(line.text));
+    }
+
+    if (header.current_result_count == 0U) {
+        reject_undeclared_result_after_empty_check(cursor);
+        return check;
     }
 
     for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
@@ -381,6 +395,12 @@ inline CheckDetailBatchResult parse_check_detail_batches(
         Line line;
         if (!cursor.next(line)) throw ScanError(cursor.position(), "truncated check text");
         check.check_text.push_back(as_string(line.text));
+    }
+
+    if (header.current_result_count == 0U) {
+        reject_undeclared_result_after_empty_check(cursor);
+        outcome.completed = true;
+        return outcome;
     }
 
     std::vector<DetailResult> batch;

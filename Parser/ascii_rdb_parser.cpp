@@ -1,10 +1,13 @@
 #include "ascii_rdb_parser.hpp"
 
 #include <cerrno>
+#include <cmath>
 #include <cstring>
 #include <deque>
 #include <fcntl.h>
 #include <limits>
+#include <locale>
+#include <sstream>
 #include <sys/stat.h>
 #include <unordered_map>
 #include <unistd.h>
@@ -99,26 +102,14 @@ bool parse_unsigned(Span value, std::uint64_t& result) {
     return true;
 }
 
-bool parse_signed(Span value, std::int64_t& result) {
-    // 좌표 부호와 int64_t 최솟값(-2^63)까지 안전하게 처리한다.
+bool parse_positive_double(Span value, double& result) {
     if (value.empty()) return false;
-    bool negative = false;
-    if (*value.begin == '+' || *value.begin == '-') {
-        negative = *value.begin == '-';
-        ++value.begin;
-    }
-    std::uint64_t magnitude = 0;
-    if (!parse_unsigned(value, magnitude)) return false;
-    const std::uint64_t positive_limit = static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max());
-    const std::uint64_t negative_limit = positive_limit + 1U;
-    if ((!negative && magnitude > positive_limit) || (negative && magnitude > negative_limit)) return false;
-    if (negative && magnitude == negative_limit) {
-        result = std::numeric_limits<std::int64_t>::min();
-    } else {
-        result = static_cast<std::int64_t>(magnitude);
-        if (negative) result = -result;
-    }
-    return true;
+    const std::string token(value.begin, value.size());
+    std::istringstream input(token);
+    input.imbue(std::locale::classic());
+    input >> std::noskipws >> result;
+    return input && input.peek() == std::char_traits<char>::eof() &&
+           std::isfinite(result) && result > 0.0;
 }
 
 /*
@@ -512,8 +503,8 @@ private:
         Span last_word;
         while (next_word(cursor, word)) last_word = word;
 
-        std::int64_t precision = 0;
-        if (last_word.empty() || !parse_signed(last_word, precision) || precision <= 0 ||
+        double precision = 0.0;
+        if (last_word.empty() || !parse_positive_double(last_word, precision) ||
             last_word.begin == text.begin) {
             fail(line, "expected '<top cell name> <database precision>'");
         }
@@ -537,19 +528,30 @@ private:
         }
 
         RuleCheck rule;
+        rule.offset = name_line.offset;
         rule.name = add_text(database, name);
         rule.executed_at = add_text(database, header.executed_at);
         rule.current_result_count = checked_count(header.current_result_count, header_line, "current result count");
         rule.original_result_count = checked_count(header.original_result_count, header_line, "original result count");
+        if (rule.current_result_count > rule.original_result_count) {
+            fail(header_line, "current result count exceeds original result count");
+        }
+        rule.declared_check_text_count =
+            checked_count(header.check_text_line_count, header_line, "check-text count");
 
         // 헤더에 text/result 개수가 있으므로 전역 배열의 재할당을 미리 줄인다.
         reserve_additional(database.check_text_lines, header.check_text_line_count, header_line, "check-text count");
         const Index text_begin = checked_index(database.check_text_lines.size(), "check-text begin");
+        std::string comment;
         for (std::uint64_t i = 0; i < header.check_text_line_count; ++i) {
             LineView text_line;
             if (!next_line(text_line)) fail_at(reader_.position(), header_line.number + i + 1U, "truncated check text");
-            database.check_text_lines.push_back(add_text(database, content(text_line)));
+            const Span line_text = content(text_line);
+            database.check_text_lines.push_back(add_text(database, line_text));
+            if (i != 0U) comment.push_back('\n');
+            comment.append(line_text.begin, line_text.size());
         }
+        rule.comment = database.strings.add(comment);
         rule.check_text = Range(text_begin,
                                 checked_index(database.check_text_lines.size() - text_begin, "check-text count"));
 
@@ -573,16 +575,26 @@ private:
             // 결과가 없는 RuleCheck도 다음 RuleCheck 경계를 확인해야 한다.
             consume_empty_rule_boundary();
         }
+        rule.detail_loaded = true;
+        if (database.rule_checks.size() >= static_cast<std::size_t>(invalid_check_id())) {
+            fail(name_line, "rule-check list exceeds CheckId capacity");
+        }
         database.rule_checks.push_back(rule);
+        ++database.loaded_rule_check_count;
     }
 
     Result parse_result(Database& database) {
-        // p/e 선언 한 개와 그 앞쪽 태그, 좌표 블록을 읽는다.
+        // Detail parser와 동일하게 p/e 선언 앞 Property도 현재 Result에 포함한다.
+        const Index property_begin = checked_index(database.tagged_values.size(), "property begin");
         LineView signature_line;
-        if (!next_nonblank(signature_line)) fail_at(reader_.position(), 0, "truncated result list");
         ResultSignature signature;
-        if (!parse_result_signature(trim(content(signature_line)), signature)) {
-            fail(signature_line, "expected 'p <ordinal> <vertex count>' or 'e <ordinal> <edge count>'");
+        for (;;) {
+            if (!next_nonblank(signature_line)) {
+                fail_at(reader_.position(), 0, "truncated result list");
+            }
+            const Span text = trim(content(signature_line));
+            if (parse_result_signature(text, signature)) break;
+            append_property(database, text);
         }
 
         Result result;
@@ -590,7 +602,6 @@ private:
         result.ordinal = checked_count(signature.ordinal, signature_line, "result ordinal");
         result.signature_suffix = signature.suffix.empty() ? invalid_string_id() : add_text(database, signature.suffix);
 
-        const Index property_begin = checked_index(database.tagged_values.size(), "property begin");
         const Index geometry_begin = signature.kind == ResultKind::Polygon
             ? checked_index(database.vertices.size(), "vertex begin")
             : checked_index(database.edges.size(), "edge begin");

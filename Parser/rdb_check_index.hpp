@@ -23,10 +23,6 @@
 
 namespace rdb {
 
-// 파일 시작 위치를 0으로 하는 바이트 단위 위치다.
-// 인덱싱 결과의 offset을 나중에 CheckDetailParser에 그대로 전달한다.
-typedef std::uint64_t CheckOffset;
-
 // 가벼운 스캐너가 형식 오류를 발견했을 때 사용한다.
 // 어느 바이트에서 문제가 났는지 함께 보관하므로 UI에서 오류 위치를 보여줄 수 있다.
 class ScanError : public std::runtime_error {
@@ -52,9 +48,12 @@ struct CheckIndexEntry {
     std::string name;
     CheckOffset offset;
     std::uint32_t geometry_count;
+    std::uint32_t original_result_count;
+    std::uint32_t check_text_line_count;
     std::string comment; // 여러 comment 줄을 '\n'으로 연결하며 마지막 '\n'은 붙이지 않는다.
 
-    CheckIndexEntry() : offset(0), geometry_count(0) {}
+    CheckIndexEntry()
+        : offset(0), geometry_count(0), original_result_count(0), check_text_line_count(0) {}
 };
 
 // 1단계 인덱싱 결과다. 파일 헤더와 TreeView용 Check 목록을 함께 반환한다.
@@ -93,6 +92,7 @@ namespace detail {
 struct FileState {
     dev_t device;
     ino_t inode;
+    nlink_t link_count;
     off_t size;
     time_t modified_seconds;
     long modified_nanoseconds;
@@ -110,6 +110,7 @@ inline FileState capture_file_state(int fd) {
     FileState state;
     state.device = status.st_dev;
     state.inode = status.st_ino;
+    state.link_count = status.st_nlink;
     state.size = status.st_size;
 #if defined(__APPLE__)
     state.modified_seconds = status.st_mtimespec.tv_sec;
@@ -128,6 +129,7 @@ inline FileState capture_file_state(int fd) {
 inline bool same_file_state(const FileState& left, const FileState& right) {
     return left.device == right.device &&
            left.inode == right.inode &&
+           left.link_count == right.link_count &&
            left.size == right.size &&
            left.modified_seconds == right.modified_seconds &&
            left.modified_nanoseconds == right.modified_nanoseconds &&
@@ -135,11 +137,18 @@ inline bool same_file_state(const FileState& left, const FileState& right) {
            left.changed_nanoseconds == right.changed_nanoseconds;
 }
 
-// Path replacement can change ctime/link metadata on an otherwise unchanged open
-// inode. Snapshot content identity therefore uses inode, size, and mtime only.
+// Exact metadata equality for a stable open-file snapshot.
 inline bool same_file_snapshot(const FileState& left, const FileState& right) {
+    return same_file_state(left, right);
+}
+
+// Replacing the pathname can unlink the already-open inode without changing its
+// bytes. Accept that one metadata transition, then rebase the snapshot state.
+inline bool same_file_after_path_replacement(const FileState& left,
+                                             const FileState& right) {
     return left.device == right.device &&
            left.inode == right.inode &&
+           right.link_count < left.link_count &&
            left.size == right.size &&
            left.modified_seconds == right.modified_seconds &&
            left.modified_nanoseconds == right.modified_nanoseconds;
@@ -568,13 +577,26 @@ inline bool make_check_index_entry(const char* buffer_begin,
     if (!parse_decimal_token(cursor, buffer_end, current) ||
         !parse_decimal_token(cursor, buffer_end, original) ||
         !parse_decimal_token(cursor, buffer_end, text_lines) ||
-        cursor > time_colon || current > std::numeric_limits<std::uint32_t>::max()) {
+        cursor > time_colon) {
         return false;
+    }
+    const CheckOffset parsed_header_offset =
+        buffer_offset + static_cast<CheckOffset>(header_begin - buffer_begin);
+    if (current > std::numeric_limits<std::uint32_t>::max() ||
+        original > std::numeric_limits<std::uint32_t>::max() ||
+        text_lines > std::numeric_limits<std::uint32_t>::max()) {
+        throw ScanError(parsed_header_offset, "rule-check count exceeds 32-bit capacity");
+    }
+    if (current > original) {
+        throw ScanError(parsed_header_offset,
+            "current result count exceeds original result count");
     }
 
     entry.name.assign(name.begin, name.size());
     entry.offset = buffer_offset + static_cast<CheckOffset>(name_begin - buffer_begin);
     entry.geometry_count = static_cast<std::uint32_t>(current);
+    entry.original_result_count = static_cast<std::uint32_t>(original);
+    entry.check_text_line_count = static_cast<std::uint32_t>(text_lines);
     header_offset = buffer_offset + static_cast<CheckOffset>(header_begin - buffer_begin);
     comment_count = text_lines;
     return true;
