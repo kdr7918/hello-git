@@ -1,7 +1,5 @@
 #include "ascii_rdb_parser.hpp"
 #include "rdb_check_detail.hpp"
-#include "rdb_check_geometry.hpp"
-#include "rdb_check_geometry_detail.hpp"
 #include "rdb_check_index.hpp"
 
 #include <cstdlib>
@@ -445,7 +443,7 @@ int main() {
     RDB_CHECK(extended_check.results[0].properties_after_geometry.size() == 2);
     RDB_CHECK(extended_check.results[1].properties_after_geometry.size() == 3);
 
-    // Qt TableView용 배치 파서는 정확히 batch_size개마다 결과를 전달하고 마지막 잔여분도 보낸다.
+    // 배치 파서는 정확히 batch_size개마다 결과를 전달하고 마지막 잔여분도 보낸다.
     std::string batched_contents = "TOP 1000\nBATCH.CHECK\n20001 20001 0 Jul 27 12:10:49 2026\n";
     for (std::size_t i = 0; i < 20001U; ++i) {
         batched_contents += "p " + std::to_string(i + 1U) + " 1\n";
@@ -487,53 +485,6 @@ int main() {
     RDB_CHECK(!cancelled.completed);
     RDB_CHECK(cancelled.parsed_result_count == 100U);
     RDB_CHECK(delivered_before_cancel == 100U);
-
-    const rdb::CheckGeometryParser geometry_parser;
-    const rdb::GeometryDatabase geometry = geometry_parser.parse_file(sample_path("standard_sample.rdb"));
-    RDB_CHECK(geometry.checks.size() == 3);
-    RDB_CHECK(geometry.results.size() == 3);
-    RDB_CHECK(geometry.vertices.size() == 8);
-    RDB_CHECK(geometry.edges.size() == 2);
-    RDB_CHECK(geometry.vertices[0].x == 10000);
-    RDB_CHECK(geometry.vertices[0].y == 20000);
-    RDB_CHECK(geometry.edges[0].second.x == 33000);
-    RDB_CHECK(geometry.edges[0].second.y == 20000);
-    RDB_CHECK(geometry.checks[0].results.count == 2);
-    RDB_CHECK(geometry.checks[1].results.count == 1);
-
-    // Coords Only 선택 파서는 태그를 복사하지 않고도 동일한 좌표를 배치로 전달한다.
-    const rdb::CheckGeometryDetailParser geometry_detail_parser;
-    std::vector<std::size_t> geometry_batch_sizes;
-    rdb::GeometryDetailBatchOptions geometry_batch_options;
-    geometry_batch_options.batch_size = 1U;
-    geometry_batch_options.batch_callback = [&geometry_batch_sizes](
-        const std::vector<rdb::GeometryDetailResult>& batch) {
-        geometry_batch_sizes.push_back(batch.size());
-        RDB_CHECK(batch[0].vertices.size() == 4U || batch[0].edges.size() == 2U);
-    };
-    const rdb::GeometryDetailBatchResult geometry_detail =
-        geometry_detail_parser.parse_file_at_batches(
-            sample_path("standard_sample.rdb"), index[0].offset, geometry_batch_options);
-    RDB_CHECK(geometry_detail.completed);
-    RDB_CHECK(geometry_detail.parsed_result_count == 2U);
-    RDB_CHECK(geometry_batch_sizes.size() == 2U);
-
-    rdb::GeometryParseOptions geometry_cancel_options;
-    geometry_cancel_options.is_cancelled = []() { return true; };
-    bool geometry_cancelled = false;
-    try {
-        geometry_parser.parse_file(sample_path("large_standard_sample.rdb"), geometry_cancel_options);
-    } catch (const rdb::GeometryParseCancelled&) {
-        geometry_cancelled = true;
-    }
-    RDB_CHECK(geometry_cancelled);
-
-    const rdb::GeometryDatabase large_geometry =
-        geometry_parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb"));
-    RDB_CHECK(large_geometry.checks.size() == 100);
-    RDB_CHECK(large_geometry.results.size() == 200);
-    RDB_CHECK(large_geometry.vertices.size() == 400);
-    RDB_CHECK(large_geometry.edges.size() == 200);
 
     std::cout << "rdb-parser-tests: OK\n";
 }

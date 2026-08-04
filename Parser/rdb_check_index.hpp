@@ -389,7 +389,7 @@ inline bool starts_coordinate(Span text) {
 }
 
 inline bool parse_point(Span text, Point& point) {
-    // 상세/좌표 전용 파서는 실제 값이 필요하므로 두 정수만 허용한다.
+    // 상세 파서는 실제 값이 필요하므로 두 정수만 허용한다.
     Span word;
     return next_word(text, word) && parse_signed(word, point.x) &&
            next_word(text, word) && parse_signed(word, point.y) && trim(text).empty();
