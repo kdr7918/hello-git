@@ -67,6 +67,13 @@ Span content(const LineView& line) {
     return Span(line.data, end);
 }
 
+Span content(const StoredLine& line) {
+    const char* const begin = line.text.data();
+    const char* end = begin + line.text.size();
+    if (end != begin && *(end - 1) == '\r') --end;
+    return Span(begin, end);
+}
+
 bool next_word(Span& input, Span& word) {
     // 문자열을 복사하지 않고 첫 단어를 꺼낸다. input은 다음 단어 앞으로 이동한다.
     input = trim(input);
@@ -583,7 +590,7 @@ private:
         result.ordinal = checked_count(signature.ordinal, signature_line, "result ordinal");
         result.signature_suffix = signature.suffix.empty() ? invalid_string_id() : add_text(database, signature.suffix);
 
-        const Index before_begin = checked_index(database.tagged_values.size(), "property begin");
+        const Index property_begin = checked_index(database.tagged_values.size(), "property begin");
         const Index geometry_begin = signature.kind == ResultKind::Polygon
             ? checked_index(database.vertices.size(), "vertex begin")
             : checked_index(database.edges.size(), "edge begin");
@@ -627,8 +634,9 @@ private:
             append_property(database, text);
         }
 
-        result.properties_before_geometry = Range(
-            before_begin, checked_index(database.tagged_values.size() - before_begin, "property count"));
+        result.properties = Range(
+            property_begin,
+            checked_index(database.tagged_values.size() - property_begin, "property count"));
         result.geometry = Range(
             geometry_begin,
             checked_index(signature.kind == ResultKind::Polygon
@@ -639,9 +647,14 @@ private:
         return result;
     }
 
+    void finish_result_properties(const Database& database, Result& result) {
+        // parse_result()가 기록한 시작점부터 tail에서 추가한 항목까지 하나의 Range로 확장한다.
+        result.properties.count = checked_index(
+            database.tagged_values.size() - result.properties.begin, "property count");
+    }
+
     void consume_nonfinal_result_tail(Database& database, Result& result) {
-        // 다음 p/e 선언 전까지의 태그는 현재 Result의 "좌표 뒤 태그"로 분류한다.
-        const Index after_begin = checked_index(database.tagged_values.size(), "post-property begin");
+        // 다음 p/e 선언 전까지의 태그도 현재 Result의 통합 property Range에 추가한다.
         for (;;) {
             LineView line;
             if (!next_nonblank(line)) fail_at(reader_.position(), 0, "result count exceeds physical result list");
@@ -649,8 +662,7 @@ private:
             if (parse_result_signature(trim(content(line)), next_result)) {
                 // 다음 결과의 선언을 미리 읽었으므로 pending_에 되돌려 다음 호출이 처리하게 한다.
                 push_front(store(line));
-                result.properties_after_geometry = Range(
-                    after_begin, checked_index(database.tagged_values.size() - after_begin, "post-property count"));
+                finish_result_properties(database, result);
                 return;
             }
             if (!options_.allow_properties_after_geometry) {
@@ -662,12 +674,10 @@ private:
 
     void consume_final_result_tail(Database& database, Result& result) {
         // 마지막 결과는 다음 Result가 아닌 다음 RuleCheck를 만나야 경계가 끝난다.
-        const Index after_begin = checked_index(database.tagged_values.size(), "post-property begin");
         for (;;) {
             LineView candidate_line;
             if (!next_nonblank(candidate_line)) {
-                result.properties_after_geometry = Range(
-                    after_begin, checked_index(database.tagged_values.size() - after_begin, "post-property count"));
+                finish_result_properties(database, result);
                 return;
             }
 
@@ -682,9 +692,8 @@ private:
                 if (!options_.allow_properties_after_geometry) {
                     fail(candidate_line, "unexpected line after final result geometry");
                 }
-                append_property(database, trim(content(candidate_line)));
-                result.properties_after_geometry = Range(
-                    after_begin, checked_index(database.tagged_values.size() - after_begin, "post-property count"));
+                append_property(database, trim(content(candidate)));
+                finish_result_properties(database, result);
                 return;
             }
 
@@ -692,8 +701,7 @@ private:
             if (parse_rule_header(trim(content(possible_header_line)), possible_header)) {
                 // 후보 이름 + 헤더 조합이 확인되면 다음 RuleCheck용으로 두 줄을 되돌린다.
                 push_rule_boundary(candidate, store(possible_header_line));
-                result.properties_after_geometry = Range(
-                    after_begin, checked_index(database.tagged_values.size() - after_begin, "post-property count"));
+                finish_result_properties(database, result);
                 return;
             }
 
@@ -701,7 +709,7 @@ private:
                 fail(candidate_line, "expected next rule-check header");
             }
 
-            append_property(database, trim(content(candidate_line)));
+            append_property(database, trim(content(candidate)));
             push_front(store(possible_header_line));
         }
     }

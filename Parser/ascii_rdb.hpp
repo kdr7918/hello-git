@@ -171,12 +171,12 @@ enum class ResultKind : std::uint8_t {
     EdgeCluster  // "e <순번> <edge 수>"
 };
 
-// p/e 결과 하나다. geometry는 실제 좌표를 복사해 담지 않고 전역 배열 구간만 가리킨다.
+// p/e 결과 하나다. property는 좌표 전/사이/후 위치를 구분하지 않고 파일에서 발견한
+// 순서대로 하나의 연속 Range에 저장한다. geometry는 전역 좌표 배열 구간을 가리킨다.
 // kind가 Polygon이면 Database::vertices, EdgeCluster이면 Database::edges를 사용한다.
 struct Result {
-    Range properties_before_geometry;
+    Range properties;
     Range geometry;
-    Range properties_after_geometry;
     StringId signature_suffix;
     std::uint32_t ordinal;
     ResultKind kind;
@@ -208,7 +208,7 @@ struct RuleCheck {
  *
  * RuleCheck::check_text             -> check_text_lines
  * RuleCheck::results                -> results
- * Result::properties_before/after_* -> tagged_values
+ * Result::properties                -> tagged_values
  * Result::geometry                  -> kind에 따라 vertices 또는 edges
  */
 struct Database {
