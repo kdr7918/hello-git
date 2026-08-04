@@ -11,8 +11,10 @@ ASCII Results Database(RDB)를 읽는 C++11 파서다.
 대용량 RDB의 Check 탐색에는 다음 두 파서를 사용한다.
 
 1. `FastCheckIndexParser` — Check 이름, Result 수, comment, 파일 offset 인덱싱
-2. `CheckDetailParser` — index offset에서 선택한 Check만 상세 또는 batch 파싱하며,
-   좌표 앞뒤의 property는 `DetailResult::properties`에 발견 순서대로 통합
+2. `CheckDetailParser` — index offset에서 선택한 Check만 상세 또는 batch 파싱
+
+전체 파서의 `Result::properties`와 선택 상세의 `DetailResult::properties`는 모두 좌표 전,
+좌표 사이, 좌표 뒤 Property를 위치별로 분리하지 않고 파일에서 발견한 순서대로 통합한다.
 
 인덱스와 선택 상세를 작은 flat pool에 함께 보관하려면 `IndexedRdbFile`을 사용한다.
 
