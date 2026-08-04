@@ -5,6 +5,8 @@
 #include <exception>
 #include <iomanip>
 #include <iostream>
+#include <limits>
+#include <stdexcept>
 #include <string>
 #include <vector>
 
@@ -26,6 +28,32 @@ struct TraversalTotals {
 
 std::string text(const rdb::Database& database, rdb::StringId id) {
     return database.strings.get(id).str();
+}
+
+// Check의 모든 Result에서 Tagged key(StringId)만 빠르게 모은다.
+// 파일의 등장 순서를 유지하고 중복 key도 유지하며, 문자열 바이트는 복사하지 않는다.
+std::vector<rdb::StringId> tagged_keys(
+    const rdb::Database& database,
+    const rdb::RuleCheck& check) {
+    std::size_t property_count = 0;
+    for (rdb::Index i = 0; i < check.results.count; ++i) {
+        const rdb::Result& result = database.results[check.results.begin + i];
+        if (result.properties.count >
+            std::numeric_limits<std::size_t>::max() - property_count) {
+            throw std::length_error("tagged key count exceeds size_t capacity");
+        }
+        property_count += result.properties.count;
+    }
+
+    std::vector<rdb::StringId> keys;
+    keys.reserve(property_count);
+    for (rdb::Index i = 0; i < check.results.count; ++i) {
+        const rdb::Result& result = database.results[check.results.begin + i];
+        for (rdb::Index j = 0; j < result.properties.count; ++j) {
+            keys.push_back(database.tagged_values[result.properties.begin + j].id);
+        }
+    }
+    return keys;
 }
 
 TraversalTotals traverse(const rdb::Database& database, const rdb::RuleCheck& check) {
@@ -136,6 +164,13 @@ int main(int argc, char** argv) {
         file.load_check(selected_id);
         const rdb::RuleCheck& loaded = database.check(selected_id);
         const TraversalTotals totals = traverse(database, loaded);
+        const std::vector<rdb::StringId> keys = tagged_keys(database, loaded);
+
+        std::cout << "Tagged keys:";
+        for (std::size_t i = 0; i < keys.size(); ++i) {
+            std::cout << ' ' << text(database, keys[i]);
+        }
+        std::cout << '\n';
 
         std::cout << "Check: " << text(database, loaded.name)
                   << " | Results: " << loaded.results.count

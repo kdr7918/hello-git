@@ -17,6 +17,17 @@ if(BUILD_TESTING)
     )
 
     add_test(
+        NAME rdb-database-example-tagged-keys
+        COMMAND rdb-database-example
+            "${CMAKE_CURRENT_SOURCE_DIR}/../standard_sample.rdb"
+            "M1.SPACING.1"
+    )
+    set_tests_properties(rdb-database-example-tagged-keys PROPERTIES
+        PASS_REGULAR_EXPRESSION
+            "Tagged keys: PP PA EL EW CN"
+    )
+
+    add_test(
         NAME rdb-database-example-missing-check
         COMMAND "${CMAKE_COMMAND}"
             "-DEXAMPLE=$<TARGET_FILE:rdb-database-example>"
