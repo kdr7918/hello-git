@@ -135,6 +135,16 @@ inline bool same_file_state(const FileState& left, const FileState& right) {
            left.changed_nanoseconds == right.changed_nanoseconds;
 }
 
+// Path replacement can change ctime/link metadata on an otherwise unchanged open
+// inode. Snapshot content identity therefore uses inode, size, and mtime only.
+inline bool same_file_snapshot(const FileState& left, const FileState& right) {
+    return left.device == right.device &&
+           left.inode == right.inode &&
+           left.size == right.size &&
+           left.modified_seconds == right.modified_seconds &&
+           left.modified_nanoseconds == right.modified_nanoseconds;
+}
+
 // 파일 버퍼를 복사하지 않고 [begin, end) 포인터 두 개로 표현한 문자열 조각이다.
 // 대형 파일에서 std::string을 매 줄마다 만들지 않기 위해 사용한다.
 struct Span {
@@ -270,6 +280,10 @@ public:
 
     const char* data() const { return data_ != 0 ? data_ : ""; }
     std::size_t size() const { return size_; }
+    // The descriptor remains owned by this object. Callers must not close it;
+    // consumers that outlive a call must duplicate it first.
+    int descriptor() const { return fd_; }
+    FileState state() const { return capture_file_state(fd_); }
 
 private:
     MappedFile(const MappedFile&);
@@ -580,6 +594,7 @@ public:
           last_progress_(-1),
           context_bytes_(options.context_bytes),
           buffer_offset_(0),
+          read_offset_(0),
           buffer_starts_at_line_boundary_(true) {
         if (options.read_buffer_bytes == 0 || options.context_bytes < 64U) {
             throw std::invalid_argument("fast RDB index buffer/context size is too small");
@@ -602,6 +617,46 @@ public:
         }
 #ifdef POSIX_FADV_SEQUENTIAL
         // 인덱스는 첫 바이트부터 한 번만 읽으므로 커널 readahead에 순차 접근을 알려 준다.
+        (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
+#endif
+    }
+
+    HeaderPatternIndexReader(int source_fd, const FastCheckIndexOptions& options)
+        : fd_(-1),
+          initial_state_(),
+          progress_callback_(options.progress_callback),
+          cancellation_callback_(options.is_cancelled),
+          last_progress_(-1),
+          context_bytes_(options.context_bytes),
+          buffer_offset_(0),
+          read_offset_(0),
+          buffer_starts_at_line_boundary_(true) {
+        if (source_fd < 0) throw std::invalid_argument("invalid RDB file descriptor");
+        if (options.read_buffer_bytes == 0 || options.context_bytes < 64U) {
+            throw std::invalid_argument("fast RDB index buffer/context size is too small");
+        }
+        if (options.read_buffer_bytes > std::numeric_limits<std::size_t>::max() - options.context_bytes) {
+            throw std::length_error("fast RDB index buffer size overflows size_t");
+        }
+        buffer_.resize(options.read_buffer_bytes + options.context_bytes);
+#ifdef F_DUPFD_CLOEXEC
+        fd_ = ::fcntl(source_fd, F_DUPFD_CLOEXEC, 0);
+#else
+        fd_ = ::dup(source_fd);
+        if (fd_ >= 0) (void)::fcntl(fd_, F_SETFD, FD_CLOEXEC);
+#endif
+        if (fd_ < 0) {
+            throw std::runtime_error(
+                "cannot duplicate RDB file descriptor: " + std::string(std::strerror(errno)));
+        }
+        try {
+            initial_state_ = capture_file_state(fd_);
+        } catch (...) {
+            ::close(fd_);
+            fd_ = -1;
+            throw;
+        }
+#ifdef POSIX_FADV_SEQUENTIAL
         (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
 #endif
     }
@@ -862,9 +917,16 @@ private:
     }
 
     ssize_t read_block(char* destination, std::size_t capacity) {
+        if (read_offset_ > static_cast<CheckOffset>(std::numeric_limits<off_t>::max())) {
+            throw ScanError(read_offset_, "RDB read offset exceeds platform file range");
+        }
         for (;;) {
-            const ssize_t received = ::read(fd_, destination, capacity);
-            if (received >= 0) return received;
+            const ssize_t received =
+                ::pread(fd_, destination, capacity, static_cast<off_t>(read_offset_));
+            if (received >= 0) {
+                read_offset_ += static_cast<CheckOffset>(received);
+                return received;
+            }
             if (errno != EINTR) {
                 throw std::runtime_error("cannot read RDB file: " + std::string(std::strerror(errno)));
             }
@@ -911,6 +973,7 @@ private:
     std::vector<char> buffer_;
     std::size_t context_bytes_;
     CheckOffset buffer_offset_;
+    CheckOffset read_offset_;
     bool buffer_starts_at_line_boundary_;
 };
 
@@ -949,11 +1012,25 @@ public:
         return detail::HeaderPatternIndexReader(path, options).run();
     }
 
+    // Duplicates fd and scans that exact open file, independent of path replacement.
+    // pread is used so the caller's descriptor offset is not changed.
+    CheckIndexDatabase parse_database(
+        int fd,
+        const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
+        return detail::HeaderPatternIndexReader(fd, options).run();
+    }
+
     // 기존 Check 목록 전용 API를 유지한다.
     std::vector<CheckIndexEntry> parse_file(
         const std::string& path,
         const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
         return parse_database(path, options).checks;
+    }
+
+    std::vector<CheckIndexEntry> parse_file(
+        int fd,
+        const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
+        return parse_database(fd, options).checks;
     }
 };
 
