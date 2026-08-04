@@ -22,8 +22,8 @@ struct DetailResult {
     ResultKind kind;
     std::uint32_t ordinal;
     std::string signature_suffix;
-    std::vector<DetailTag> properties_before_geometry;
-    std::vector<DetailTag> properties_after_geometry;
+    // 좌표 앞뒤 위치를 구분하지 않고 파일에서 발견한 순서대로 보관한다.
+    std::vector<DetailTag> properties;
     std::vector<Point> vertices;
     std::vector<Edge> edges;
 
@@ -90,7 +90,7 @@ inline void consume_detail_geometry(LineCursor& cursor,
                                     const ResultSignature& signature,
                                     DetailResult& result) {
     // 선언된 좌표 수를 모두 읽을 때까지 진행한다.
-    // 좌표 앞의 태그는 properties_before_geometry에 보관한다.
+    // 좌표 앞의 태그는 properties에 보관한다.
     std::uint64_t seen = 0;
     while (seen < signature.coordinate_count) {
         Line line;
@@ -118,7 +118,7 @@ inline void consume_detail_geometry(LineCursor& cursor,
         if (parse_result_signature(text, unexpected)) {
             throw ScanError(line.offset, "result ended before its declared coordinate count");
         }
-        result.properties_before_geometry.push_back(parse_detail_tag(text));
+        result.properties.push_back(parse_detail_tag(text));
     }
 }
 
@@ -135,7 +135,7 @@ inline void consume_detail_intermediate_tail(LineCursor& cursor, DetailResult& r
             cursor.reset(mark);
             return;
         }
-        result.properties_after_geometry.push_back(parse_detail_tag(trim(line.text)));
+        result.properties.push_back(parse_detail_tag(trim(line.text)));
     }
 }
 
@@ -155,7 +155,7 @@ inline void consume_detail_final_tail(LineCursor& cursor, DetailResult& result) 
 
         Line possible_header;
         if (!next_nonblank(cursor, possible_header)) {
-            result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
+            result.properties.push_back(parse_detail_tag(trim(candidate.text)));
             return;
         }
 
@@ -164,7 +164,7 @@ inline void consume_detail_final_tail(LineCursor& cursor, DetailResult& result) 
             return;
         }
 
-        result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
+        result.properties.push_back(parse_detail_tag(trim(candidate.text)));
         // possible_header는 이미 읽었지만 다음 후보로 재사용한다.
         // mmap의 Line 포인터는 파싱 중 유효하므로 파일을 다시 읽을 필요가 없다.
         candidate = possible_header;
@@ -219,7 +219,7 @@ inline CheckDetail parse_check_detail(const MappedFile& file, CheckOffset offset
                 found = true;
                 break;
             }
-            result.properties_before_geometry.push_back(
+            result.properties.push_back(
                 parse_detail_tag(trim(signature_line.text)));
         }
         if (!found) throw ScanError(cursor.position(), "truncated result list");
@@ -284,7 +284,7 @@ inline bool consume_detail_geometry_cancellable(
         if (parse_result_signature(text, unexpected)) {
             throw ScanError(line.offset, "result ended before its declared coordinate count");
         }
-        result.properties_before_geometry.push_back(parse_detail_tag(text));
+        result.properties.push_back(parse_detail_tag(text));
     }
     return true;
 }
@@ -305,7 +305,7 @@ inline bool consume_detail_intermediate_tail_cancellable(
             cursor.reset(mark);
             return true;
         }
-        result.properties_after_geometry.push_back(parse_detail_tag(trim(line.text)));
+        result.properties.push_back(parse_detail_tag(trim(line.text)));
     }
 }
 
@@ -327,13 +327,13 @@ inline bool consume_detail_final_tail_cancellable(
 
         Line possible_header;
         if (!next_nonblank(cursor, possible_header)) {
-            result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
+            result.properties.push_back(parse_detail_tag(trim(candidate.text)));
             return true;
         }
 
         RuleHeader next_header;
         if (parse_rule_header(trim(possible_header.text), next_header)) return true;
-        result.properties_after_geometry.push_back(parse_detail_tag(trim(candidate.text)));
+        result.properties.push_back(parse_detail_tag(trim(candidate.text)));
         candidate = possible_header;
         have_candidate = true;
     }
@@ -397,7 +397,7 @@ inline CheckDetailBatchResult parse_check_detail_batches(
                 found = true;
                 break;
             }
-            result.properties_before_geometry.push_back(parse_detail_tag(trim(signature_line.text)));
+            result.properties.push_back(parse_detail_tag(trim(signature_line.text)));
         }
         if (!found) throw ScanError(cursor.position(), "truncated result list");
 

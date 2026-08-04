@@ -428,7 +428,7 @@ int main() {
     RDB_CHECK(first_check.name == "M1.SPACING.1");
     RDB_CHECK(first_check.results.size() == 2);
     RDB_CHECK(first_check.results[0].vertices.size() == 4);
-    RDB_CHECK(first_check.results[0].properties_before_geometry.size() == 5);
+    RDB_CHECK(first_check.results[0].properties.size() == 5);
     RDB_CHECK(first_check.results[1].edges.size() == 2);
 
     const rdb::CheckDetailFile detail_file(sample_path("standard_sample.rdb"));
@@ -440,8 +440,43 @@ int main() {
     const rdb::CheckDetail extended_check = detail_parser.parse_file_at(
         sample_path("post_coordinate_tags_sample.rdb"),
         index_parser.parse_file(sample_path("post_coordinate_tags_sample.rdb"))[0].offset);
-    RDB_CHECK(extended_check.results[0].properties_after_geometry.size() == 2);
-    RDB_CHECK(extended_check.results[1].properties_after_geometry.size() == 3);
+    RDB_CHECK(extended_check.results[0].properties.size() == 2);
+    RDB_CHECK(extended_check.results[0].properties[0].id == "PP");
+    RDB_CHECK(extended_check.results[0].properties[1].id == "PA");
+    RDB_CHECK(extended_check.results[1].properties.size() == 3);
+    RDB_CHECK(extended_check.results[1].properties[0].id == "EL");
+    RDB_CHECK(extended_check.results[1].properties[2].id == "CN");
+
+    // 좌표 앞뒤에 있던 property는 파일에서 발견한 순서대로 하나의 vector에 보관한다.
+    const TemporaryRdb mixed_property_file(
+        "TOP 1000\nMIXED.PROPERTIES\n1 1 0 Jul 21 10:35:00 2026\n"
+        "PB before geometry\np 1 1\n0 0\nPA after geometry\n");
+    const rdb::CheckOffset mixed_property_offset =
+        index_parser.parse_file(mixed_property_file.path())[0].offset;
+    const rdb::CheckDetail mixed_property_check =
+        detail_parser.parse_file_at(mixed_property_file.path(), mixed_property_offset);
+    RDB_CHECK(mixed_property_check.results[0].properties.size() == 2);
+    RDB_CHECK(mixed_property_check.results[0].properties[0].id == "PB");
+    RDB_CHECK(mixed_property_check.results[0].properties[0].payload == "before geometry");
+    RDB_CHECK(mixed_property_check.results[0].properties[1].id == "PA");
+    RDB_CHECK(mixed_property_check.results[0].properties[1].payload == "after geometry");
+
+    std::size_t mixed_property_batches = 0;
+    rdb::CheckDetailBatchOptions mixed_property_options;
+    mixed_property_options.batch_size = 1U;
+    mixed_property_options.batch_callback = [&mixed_property_batches](
+        const std::vector<rdb::DetailResult>& batch) {
+        ++mixed_property_batches;
+        RDB_CHECK(batch.size() == 1U);
+        RDB_CHECK(batch[0].properties.size() == 2U);
+        RDB_CHECK(batch[0].properties[0].id == "PB");
+        RDB_CHECK(batch[0].properties[1].id == "PA");
+    };
+    const rdb::CheckDetailBatchResult mixed_property_batch_result =
+        detail_parser.parse_file_at_batches(
+            mixed_property_file.path(), mixed_property_offset, mixed_property_options);
+    RDB_CHECK(mixed_property_batch_result.completed);
+    RDB_CHECK(mixed_property_batches == 1U);
 
     // 배치 파서는 정확히 batch_size개마다 결과를 전달하고 마지막 잔여분도 보낸다.
     std::string batched_contents = "TOP 1000\nBATCH.CHECK\n20001 20001 0 Jul 27 12:10:49 2026\n";
