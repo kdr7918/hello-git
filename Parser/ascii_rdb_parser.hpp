@@ -11,9 +11,6 @@
 
 namespace rdb {
 
-// 수십 GB 파일에서도 바이트 위치를 표현할 수 있도록 64비트를 사용한다.
-typedef std::uint64_t FileOffset;
-
 // 문법 오류가 난 파일 위치와 줄 번호를 함께 전달한다.
 class ParseError : public std::runtime_error {
 public:

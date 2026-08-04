@@ -1,6 +1,6 @@
 add_library(ascii_rdb_parser
     ascii_rdb_parser.cpp
-    rdb_compact_database.cpp
+    rdb_indexed_file.cpp
 )
 target_include_directories(ascii_rdb_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 target_compile_options(ascii_rdb_parser PRIVATE
@@ -22,10 +22,11 @@ if(BUILD_TESTING)
     )
     add_test(NAME rdb-check-index-header-test COMMAND rdb-check-index-header-test)
 
-    add_executable(rdb-compact-database-header-test rdb_compact_database_header_test.cpp)
-    target_link_libraries(rdb-compact-database-header-test PRIVATE ascii_rdb_parser)
-    target_compile_options(rdb-compact-database-header-test PRIVATE
+    add_executable(rdb-unified-database-test rdb_unified_database_test.cpp)
+    target_link_libraries(rdb-unified-database-test PRIVATE ascii_rdb_parser)
+    target_compile_options(rdb-unified-database-test PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
     )
-    add_test(NAME rdb-compact-database-header-test COMMAND rdb-compact-database-header-test)
+    target_compile_definitions(rdb-unified-database-test PRIVATE RDB_SAMPLE_DIR="${CMAKE_CURRENT_SOURCE_DIR}/..")
+    add_test(NAME rdb-unified-database-test COMMAND rdb-unified-database-test)
 endif()

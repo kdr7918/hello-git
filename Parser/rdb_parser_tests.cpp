@@ -1,7 +1,6 @@
 #include "ascii_rdb_parser.hpp"
 #include "rdb_check_detail.hpp"
 #include "rdb_check_index.hpp"
-#include "rdb_compact_database.hpp"
 
 #include <cstdlib>
 #include <cstdio>
@@ -73,30 +72,6 @@ const rdb::Result& result(const rdb::Database& database,
     return database.results[rule_check.results.begin + index];
 }
 
-void expect_store_rejected_unchanged(rdb::CompactCheckDatabase& database,
-                                     rdb::CheckId id,
-                                     const rdb::CheckDetail& detail) {
-    const rdb::CompactMemoryUsage before = database.memory_usage();
-    const std::size_t check_count_before = database.check_count();
-    const std::size_t loaded_before = database.loaded_check_count();
-    const std::uint32_t result_count_before = database.check(id).result_count();
-    const bool detail_loaded_before = database.check(id).detail_loaded();
-    bool rejected = false;
-    try {
-        database.store_detail(id, detail);
-    } catch (const std::invalid_argument&) {
-        rejected = true;
-    }
-    RDB_CHECK(rejected);
-    const rdb::CompactMemoryUsage after = database.memory_usage();
-    RDB_CHECK(after.used_bytes == before.used_bytes);
-    RDB_CHECK(after.capacity_bytes == before.capacity_bytes);
-    RDB_CHECK(database.check_count() == check_count_before);
-    RDB_CHECK(database.loaded_check_count() == loaded_before);
-    RDB_CHECK(database.check(id).detail_loaded() == detail_loaded_before);
-    RDB_CHECK(database.check(id).result_count() == result_count_before);
-}
-
 } // namespace
 
 int main() {
@@ -116,7 +91,15 @@ int main() {
     RDB_CHECK(text(standard, standard.top_cell_name) == "TOP_CHIP");
     RDB_CHECK(standard.database_precision == 1000);
     RDB_CHECK(standard.rule_checks.size() == 3);
+    RDB_CHECK(standard.loaded_check_count() == 3U);
     RDB_CHECK(text(standard, rule(standard, 0).name) == "M1.SPACING.1");
+    RDB_CHECK(rule(standard, 0).offset == 14U);
+    RDB_CHECK(rule(standard, 0).detail_loaded);
+    RDB_CHECK(rule(standard, 0).declared_check_text_count == 3U);
+    RDB_CHECK(text(standard, rule(standard, 0).comment) ==
+        "Rule File Pathname: ./demo.svrf\n"
+        "Rule File Title: Example DRC deck\n"
+        "M1 spacing must be at least 0.14 um.");
     RDB_CHECK(rule(standard, 0).check_text.count == 3);
     RDB_CHECK(rule(standard, 0).results.count == 2);
     RDB_CHECK(result(standard, rule(standard, 0), 0).kind == rdb::ResultKind::Polygon);
@@ -604,156 +587,6 @@ int main() {
     RDB_CHECK(!cancelled.completed);
     RDB_CHECK(cancelled.parsed_result_count == 100U);
     RDB_CHECK(delivered_before_cancel == 100U);
-
-    // Fast index와 선택 detail을 Database처럼 flat pool/range 기반 저장소에 합친다.
-    rdb::CompactCheckDatabase compact = rdb::CompactCheckDatabase::from_index(
-        index_parser.parse_database(sample_path("standard_sample.rdb")));
-    RDB_CHECK(compact.top_cell_name().str() == "TOP_CHIP");
-    RDB_CHECK(compact.database_precision() == 1000.0);
-    RDB_CHECK(compact.check_count() == 3U);
-    RDB_CHECK(compact.loaded_check_count() == 0U);
-    RDB_CHECK(compact.check(0).name().str() == "M1.SPACING.1");
-    RDB_CHECK(compact.check(0).offset() == index[0].offset);
-    RDB_CHECK(compact.check(0).result_count() == 2U);
-    RDB_CHECK(!compact.check(0).detail_loaded());
-    RDB_CHECK(compact.find_check_by_offset(index[1].offset) == 1U);
-    RDB_CHECK(compact.find_checks("M2.DENSITY.MIN").size() == 1U);
-
-    bool invalid_check_id_rejected = false;
-    try {
-        (void)compact.check(rdb::invalid_check_id());
-    } catch (const std::out_of_range&) {
-        invalid_check_id_rejected = true;
-    }
-    RDB_CHECK(invalid_check_id_rejected);
-
-    // Every validation failure happens before mutation/reserve and is transactional.
-    rdb::CompactCheckDatabase rollback = rdb::CompactCheckDatabase::from_index(index_database);
-    rdb::CheckDetail mismatched = first_check;
-    mismatched.name = "OTHER.NAME";
-    expect_store_rejected_unchanged(rollback, 0U, mismatched);
-    mismatched = first_check;
-    ++mismatched.offset;
-    expect_store_rejected_unchanged(rollback, 0U, mismatched);
-    mismatched = first_check;
-    --mismatched.current_result_count;
-    mismatched.results.resize(mismatched.current_result_count);
-    expect_store_rejected_unchanged(rollback, 0U, mismatched);
-    mismatched = first_check;
-    mismatched.results[0].kind = rdb::ResultKind::EdgeCluster;
-    expect_store_rejected_unchanged(rollback, 0U, mismatched);
-    mismatched = first_check;
-    mismatched.results[0].kind = static_cast<rdb::ResultKind>(99);
-    expect_store_rejected_unchanged(rollback, 0U, mismatched);
-
-    compact.store_detail(0U, first_check);
-    RDB_CHECK(compact.loaded_check_count() == 1U);
-    const rdb::CompactCheckView stored_check = compact.check(0U);
-    RDB_CHECK(stored_check.detail_loaded());
-    RDB_CHECK(stored_check.executed_at().str() == first_check.executed_at);
-    RDB_CHECK(stored_check.check_text_count() == first_check.check_text.size());
-    RDB_CHECK(stored_check.detail_result_count() == 2U);
-    const rdb::CompactResultView stored_polygon = stored_check.result(0U);
-    RDB_CHECK(stored_polygon.kind() == rdb::ResultKind::Polygon);
-    RDB_CHECK(stored_polygon.ordinal() == 1U);
-    RDB_CHECK(stored_polygon.property_count() == 5U);
-    RDB_CHECK(stored_polygon.property(0U).id().str() == "PP");
-    RDB_CHECK(stored_polygon.property(0U).payload().str() == "M1 spacing marker");
-    RDB_CHECK(stored_polygon.vertex_count() == 4U);
-    RDB_CHECK(stored_polygon.vertex(0U).x == 10000);
-    RDB_CHECK(stored_polygon.edge_count() == 0U);
-    const rdb::CompactResultView stored_edges = stored_check.result(1U);
-    RDB_CHECK(stored_edges.edge_count() == 2U);
-    RDB_CHECK(stored_edges.vertex_count() == 0U);
-
-    const rdb::CompactMemoryUsage compact_memory = compact.memory_usage();
-    RDB_CHECK(compact_memory.used_bytes > 0U);
-    RDB_CHECK(compact_memory.capacity_bytes >= compact_memory.used_bytes);
-    RDB_CHECK(sizeof(rdb::CompactCheckRecord) <= 32U);
-    RDB_CHECK(sizeof(rdb::CompactResultRecord) <= 32U);
-    RDB_CHECK(sizeof(rdb::CompactPropertyRecord) <= 12U);
-
-    bool unloaded_detail_rejected = false;
-    try {
-        (void)compact.check(1U).result(0U);
-    } catch (const std::logic_error&) {
-        unloaded_detail_rejected = true;
-    }
-    RDB_CHECK(unloaded_detail_rejected);
-
-    bool duplicate_detail_rejected = false;
-    try {
-        compact.store_detail(0U, first_check);
-    } catch (const std::logic_error&) {
-        duplicate_detail_rejected = true;
-    }
-    RDB_CHECK(duplicate_detail_rejected);
-
-    const TemporaryRdb duplicate_check_file(
-        "TOP 1000\nDUP.CHECK\n2 2 0 Jul 21 10:35:00 2026\n"
-        "SHARED first-value\np 1 1\n0 0\ne 2 1\n1 2 3 4\n"
-        "DUP.CHECK\n1 1 0 Jul 21 10:36:00 2026\n"
-        "SHARED second-value\np 1 1\n10 20\n");
-    rdb::IndexedRdbFile indexed_file(duplicate_check_file.path());
-    RDB_CHECK(indexed_file.check_count() == 2U);
-    const std::vector<rdb::CheckId> duplicates = indexed_file.find_checks("DUP.CHECK");
-    RDB_CHECK(duplicates.size() == 2U);
-    RDB_CHECK(duplicates[0] == 0U);
-    RDB_CHECK(duplicates[1] == 1U);
-    indexed_file.load_check(duplicates[0]);
-    const rdb::CompactPropertyView first_shared =
-        indexed_file.check(0U).result(0U).property(0U);
-    const rdb::Point copied_point = indexed_file.check(0U).result(0U).vertex(0U);
-    const rdb::Edge copied_edge = indexed_file.check(0U).result(1U).edge(0U);
-    indexed_file.load_check(duplicates[1]);
-    RDB_CHECK(indexed_file.database().loaded_check_count() == 2U);
-    RDB_CHECK(indexed_file.check(0U).result(0U).vertex_count() == 1U);
-    RDB_CHECK(indexed_file.check(0U).result(1U).edge_count() == 1U);
-    RDB_CHECK(first_shared.id().str() == "SHARED");
-    RDB_CHECK(first_shared.payload().str() == "first-value");
-    RDB_CHECK(indexed_file.check(1U).result(0U).property(0U).id().str() == "SHARED");
-    RDB_CHECK(indexed_file.check(1U).result(0U).property(0U).payload().str() == "second-value");
-    RDB_CHECK(copied_point.x == 0 && copied_point.y == 0);
-    RDB_CHECK(copied_edge.first.x == 1 && copied_edge.first.y == 2);
-    RDB_CHECK(copied_edge.second.x == 3 && copied_edge.second.y == 4);
-
-    bool indexed_invalid_id_rejected = false;
-    try {
-        (void)indexed_file.load_check(rdb::invalid_check_id());
-    } catch (const std::out_of_range&) {
-        indexed_invalid_id_rejected = true;
-    }
-    RDB_CHECK(indexed_invalid_id_rejected);
-
-    // Replacing the pathname cannot redirect detail parsing away from the open snapshot.
-    const TemporaryRdb snapshot_file(
-        "TOP 1000\nSNAPSHOT.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n7 8\n");
-    rdb::IndexedRdbFile snapshot(snapshot_file.path());
-    const TemporaryRdb replacement_file(
-        "TOP 1000\nREPLACEMENT.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n9 9\n");
-    RDB_CHECK(::rename(replacement_file.path().c_str(), snapshot_file.path().c_str()) == 0);
-    const rdb::CompactCheckView snapshot_check = snapshot.load_check(0U);
-    RDB_CHECK(snapshot_check.name().str() == "SNAPSHOT.CHECK");
-    RDB_CHECK(snapshot_check.result(0U).vertex(0U).x == 7);
-    RDB_CHECK(snapshot_check.result(0U).vertex(0U).y == 8);
-
-    // Same-inode writes after construction are rejected before mapped detail access.
-    const TemporaryRdb modified_file(
-        "TOP 1000\nMODIFIED.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n1 2\n");
-    rdb::IndexedRdbFile modified(modified_file.path());
-    const int modified_fd = ::open(modified_file.path().c_str(), O_RDWR | O_CLOEXEC);
-    RDB_CHECK(modified_fd >= 0);
-    RDB_CHECK(::pwrite(modified_fd, "X", 1, 0) == 1);
-    RDB_CHECK(::fsync(modified_fd) == 0);
-    RDB_CHECK(::close(modified_fd) == 0);
-    bool modified_rejected = false;
-    try {
-        (void)modified.load_check(0U);
-    } catch (const std::runtime_error&) {
-        modified_rejected = true;
-    }
-    RDB_CHECK(modified_rejected);
-    RDB_CHECK(!modified.check(0U).detail_loaded());
 
     std::cout << "rdb-parser-tests: OK\n";
 }
