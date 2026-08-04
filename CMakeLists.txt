@@ -7,3 +7,4 @@ set(CMAKE_CXX_EXTENSIONS OFF)
 
 include(CTest)
 add_subdirectory(Parser)
+add_subdirectory(examples)
