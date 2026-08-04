@@ -7,6 +7,8 @@ target_compile_options(rdb_indexed_file PRIVATE
 )
 
 if(BUILD_TESTING)
+    find_package(Threads REQUIRED)
+
     add_executable(rdb-parser-tests rdb_parser_tests.cpp)
     target_link_libraries(rdb-parser-tests PRIVATE rdb_indexed_file)
     target_compile_options(rdb-parser-tests PRIVATE
@@ -22,7 +24,7 @@ if(BUILD_TESTING)
     add_test(NAME rdb-check-index-header-test COMMAND rdb-check-index-header-test)
 
     add_executable(rdb-unified-database-test rdb_unified_database_test.cpp)
-    target_link_libraries(rdb-unified-database-test PRIVATE rdb_indexed_file)
+    target_link_libraries(rdb-unified-database-test PRIVATE rdb_indexed_file Threads::Threads)
     target_compile_options(rdb-unified-database-test PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
     )

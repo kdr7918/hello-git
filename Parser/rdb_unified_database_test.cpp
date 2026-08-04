@@ -3,6 +3,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <fcntl.h>
+#include <future>
 #include <iostream>
 #include <stdexcept>
 #include <string>
@@ -67,6 +68,18 @@ int main() {
         std::is_same<decltype(std::declval<const rdb::IndexedRdbFile&>().database()),
                      const rdb::Database&>::value,
         "IndexedRdbFile must expose the canonical Database as read-only state");
+    static_assert(std::is_copy_constructible<rdb::IndexedRdbFile>::value,
+                  "IndexedRdbFile must support independent copy construction");
+    static_assert(std::is_copy_assignable<rdb::IndexedRdbFile>::value,
+                  "IndexedRdbFile must support independent copy assignment");
+    static_assert(std::is_move_constructible<rdb::IndexedRdbFile>::value,
+                  "IndexedRdbFile must support efficient ownership transfer");
+    static_assert(std::is_move_assignable<rdb::IndexedRdbFile>::value,
+                  "IndexedRdbFile must support efficient parsed-state replacement");
+    static_assert(std::is_nothrow_move_constructible<rdb::IndexedRdbFile>::value,
+                  "IndexedRdbFile move construction must not copy parsed pools");
+    static_assert(std::is_nothrow_move_assignable<rdb::IndexedRdbFile>::value,
+                  "IndexedRdbFile move assignment must not copy parsed pools");
 
     rdb::StringTable checkpoint_table;
     checkpoint_table.add("kept", 4U);
@@ -93,6 +106,30 @@ int main() {
         stale_checkpoint_rejected = true;
     }
     RDB_CHECK(stale_checkpoint_rejected);
+
+    rdb::StringTable swap_left;
+    rdb::StringTable swap_right;
+    swap_left.add("left", 4U);
+    swap_right.add("right", 5U);
+    const rdb::StringTable::Checkpoint left_pre_swap_checkpoint = swap_left.checkpoint();
+    const rdb::StringTable::Checkpoint right_pre_swap_checkpoint = swap_right.checkpoint();
+    swap_left.swap(swap_right);
+    RDB_CHECK(swap_left.get(0U).str() == "right");
+    RDB_CHECK(swap_right.get(0U).str() == "left");
+    bool pre_swap_checkpoint_rejected = false;
+    try {
+        swap_left.rollback(left_pre_swap_checkpoint);
+    } catch (const std::out_of_range&) {
+        pre_swap_checkpoint_rejected = true;
+    }
+    RDB_CHECK(pre_swap_checkpoint_rejected);
+    bool right_pre_swap_checkpoint_rejected = false;
+    try {
+        swap_right.rollback(right_pre_swap_checkpoint);
+    } catch (const std::out_of_range&) {
+        right_pre_swap_checkpoint_rejected = true;
+    }
+    RDB_CHECK(right_pre_swap_checkpoint_rejected);
 
     const std::string path = std::string(RDB_SAMPLE_DIR) + "/standard_sample.rdb";
     rdb::IndexedRdbFile file(path);
@@ -167,6 +204,85 @@ int main() {
     RDB_CHECK(all_file.database().check(2U).results.count == 0U);
     all_file.load_all();
     RDB_CHECK(all_file.database().loaded_check_count() == 3U);
+
+    // Copies share only the immutable open-file snapshot. Their canonical Database
+    // and parser-session tag state remain independent while lazy loading continues.
+    rdb::IndexedRdbFile copy_source(path);
+    copy_source.load_check(0U);
+    rdb::IndexedRdbFile copy_constructed(copy_source);
+    copy_constructed.load_check(1U);
+    RDB_CHECK(copy_source.database().loaded_check_count() == 1U);
+    RDB_CHECK(copy_constructed.database().loaded_check_count() == 2U);
+    RDB_CHECK(!copy_source.database().check(1U).detail_loaded);
+    RDB_CHECK(copy_constructed.database().check(1U).detail_loaded);
+
+    // Assignment replaces both Database contents and the backing file snapshot.
+    // The assigned copy must remain usable after the source object is destroyed.
+    const TemporaryRdb assignment_initial("ASSIGNMENT_OLD 1000\n");
+    rdb::IndexedRdbFile assigned(assignment_initial.path());
+    {
+        rdb::IndexedRdbFile assignment_source(path);
+        assignment_source.load_check(0U);
+        assigned = assignment_source;
+        assignment_source = assignment_source;
+        RDB_CHECK(assignment_source.database().loaded_check_count() == 1U);
+        assigned.load_check(1U);
+        RDB_CHECK(assigned.database().loaded_check_count() == 2U);
+        RDB_CHECK(!assignment_source.database().check(1U).detail_loaded);
+        assignment_source.load_check(2U);
+        RDB_CHECK(assignment_source.database().check(2U).detail_loaded);
+        RDB_CHECK(!assigned.database().check(2U).detail_loaded);
+    }
+    RDB_CHECK(text(assigned.database(), assigned.database().top_cell_name) == "TOP_CHIP");
+    RDB_CHECK(assigned.database().loaded_check_count() == 2U);
+
+    const TemporaryRdb copied_snapshot_source(
+        "COPY_SNAPSHOT 1000\nCOPY.ONE\n0 0 0 Jul 21 10:35:00 2026\n"
+        "COPY.TWO\n1 1 0 Jul 21 10:36:00 2026\np 1 1\n11 12\n");
+    const TemporaryRdb copied_snapshot_initial("COPY_OLD 1000\n");
+    rdb::IndexedRdbFile copied_snapshot(copied_snapshot_initial.path());
+    {
+        rdb::IndexedRdbFile snapshot_source(copied_snapshot_source.path());
+        copied_snapshot = snapshot_source;
+    }
+    RDB_CHECK(::unlink(copied_snapshot_source.path().c_str()) == 0);
+    copied_snapshot.load_check(1U);
+    const rdb::RuleCheck& copied_snapshot_check = copied_snapshot.database().check(1U);
+    const rdb::Result& copied_snapshot_result =
+        copied_snapshot.database().results[copied_snapshot_check.results.begin];
+    RDB_CHECK(copied_snapshot.database().vertices[copied_snapshot_result.geometry.begin].x == 11);
+    RDB_CHECK(copied_snapshot.database().vertices[copied_snapshot_result.geometry.begin].y == 12);
+
+    // Intended workflow: parse every Check on a worker thread, then replace the
+    // foreground object with an O(1) move assignment after synchronization.
+    std::future<rdb::IndexedRdbFile> full_parse = std::async(
+        std::launch::async,
+        [path]() {
+            rdb::IndexedRdbFile parsed(path);
+            parsed.load_all();
+            return parsed;
+        });
+    const TemporaryRdb foreground_initial("FOREGROUND_OLD 1000\n");
+    rdb::IndexedRdbFile foreground(foreground_initial.path());
+    rdb::IndexedRdbFile parsed = full_parse.get();
+    const rdb::Result* const parsed_results = parsed.database().results.data();
+    const rdb::Point* const parsed_vertices = parsed.database().vertices.data();
+    const rdb::Edge* const parsed_edges = parsed.database().edges.data();
+    const rdb::TaggedValue* const parsed_properties = parsed.database().tagged_values.data();
+    const rdb::StringId* const parsed_check_text = parsed.database().check_text_lines.data();
+    const char* const parsed_top_cell =
+        parsed.database().strings.get(parsed.database().top_cell_name).data;
+    foreground = std::move(parsed);
+    RDB_CHECK(text(foreground.database(), foreground.database().top_cell_name) == "TOP_CHIP");
+    RDB_CHECK(foreground.database().loaded_check_count() == foreground.database().check_count());
+    RDB_CHECK(foreground.database().results.size() == all_file.database().results.size());
+    RDB_CHECK(foreground.database().results.data() == parsed_results);
+    RDB_CHECK(foreground.database().vertices.data() == parsed_vertices);
+    RDB_CHECK(foreground.database().edges.data() == parsed_edges);
+    RDB_CHECK(foreground.database().tagged_values.data() == parsed_properties);
+    RDB_CHECK(foreground.database().check_text_lines.data() == parsed_check_text);
+    RDB_CHECK(foreground.database().strings.get(foreground.database().top_cell_name).data ==
+              parsed_top_cell);
 
     const TemporaryRdb decimal_header("TOP_DECIMAL 1.25e-3\n");
     const rdb::IndexedRdbFile indexed_decimal(decimal_header.path());

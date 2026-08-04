@@ -4,6 +4,7 @@
 #include "rdb_check_detail.hpp"
 
 #include <cstddef>
+#include <memory>
 #include <string>
 #include <vector>
 
@@ -16,6 +17,13 @@ public:
     explicit IndexedRdbFile(
         const std::string& path,
         const FastCheckIndexOptions& options = FastCheckIndexOptions());
+    IndexedRdbFile(const IndexedRdbFile&) = default;
+    IndexedRdbFile(IndexedRdbFile&&) noexcept = default;
+
+    // Copy assignment deep-copies Database/parser state. Passing an rvalue moves
+    // the fully parsed pools, which is the efficient worker-thread replacement path.
+    IndexedRdbFile& operator=(IndexedRdbFile other) noexcept;
+    void swap(IndexedRdbFile& other) noexcept;
 
     const Database& database() const { return database_; }
     std::size_t check_count() const { return database_.check_count(); }
@@ -28,11 +36,11 @@ public:
     void load_all();
 
 private:
-    IndexedRdbFile(const IndexedRdbFile&);
-    IndexedRdbFile& operator=(const IndexedRdbFile&);
     void verify_file_unchanged();
 
-    detail::MappedFile file_;
+    // Copies share the same open inode/mmap lifetime while Database state is deep-copied.
+    // The backing inode must not be modified in place while any copy may parse it.
+    std::shared_ptr<detail::MappedFile> file_;
     detail::FileState file_state_;
     Database database_;
     // Property tag interning is parser-session state, not canonical Database data.

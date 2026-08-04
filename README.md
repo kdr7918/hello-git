@@ -74,6 +74,43 @@ if (!ids.empty()) {
 `Database`에 완성한다. Result가 0개인 Check도 `detail_loaded`로 index-only 상태와
 구분한다.
 
+## 백그라운드 full parse 후 교체
+
+`IndexedRdbFile` 복사는 같은 open inode와 mmap 수명만 공유하고 `Database`와 tag parser
+상태는 독립적으로 깊은 복사한다. 따라서 복사가 완료된 뒤 서로 다른 복사본에서
+`load_check()`를 호출해도 상대 복사본의 Database는 변경되지 않는다.
+
+전체 파싱 결과를 전면 객체로 교체할 때는 복사 대입도 가능하지만, 대용량 pool을 다시 복사하지
+않도록 worker 결과를 **move 대입**하는 것이 권장된다.
+
+```cpp
+#include <future>
+
+std::future<rdb::IndexedRdbFile> pending = std::async(
+    std::launch::async,
+    []() {
+        rdb::IndexedRdbFile parsed("results.rdb");
+        parsed.load_all();
+        return parsed;
+    });
+
+// UI/foreground thread에서 기존 index-only 객체를 계속 사용한다.
+rdb::IndexedRdbFile active("results.rdb");
+
+// worker 완료 후 foreground reader가 없는 동기화 지점에서 O(1)로 교체한다.
+active = pending.get();
+```
+
+`IndexedRdbFile`은 내부 동기화를 제공하지 않는다. 같은 인스턴스의 `load_check()`/`load_all()`/
+대입/swap과 read/copy/move를 겹치면 data race이므로 외부에서 동기화해야 한다. 복사가 완료된
+서로 다른 인스턴스는 독립적으로 lazy load할 수 있다. worker 완료를 기다린 뒤 mutex,
+event-loop handoff 등으로 기존 reader가 없는 시점에 교체해야 하며, 대입하면 기존
+`database()`에서 얻은 참조·포인터·iterator는 모두 무효화된다.
+
+공유 mmap은 파일 바이트를 별도 복제한 immutable snapshot이 아니다. lazy parse가 끝날 때까지
+backing inode를 제자리 수정하거나 truncate하면 안 된다. pathname 갱신은 기존 inode를 건드리지
+않는 rename 기반 원자 교체를 사용해야 한다.
+
 ## 수명과 순서
 
 - `CheckId`는 `Database::rule_checks`의 index이며 파일 순서대로 고정된다.
