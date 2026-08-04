@@ -164,6 +164,15 @@ public:
         ++epoch_;
     }
 
+    void swap(StringTable& other) noexcept {
+        records_.swap(other.records_);
+        bytes_.swap(other.bytes_);
+        // Checkpoints are bound to an object's previous contents, so swapping
+        // invalidates checkpoints from both tables instead of swapping epochs.
+        ++epoch_;
+        ++other.epoch_;
+    }
+
     void clear() { records_.clear(); bytes_.clear(); ++epoch_; }
 
 private:

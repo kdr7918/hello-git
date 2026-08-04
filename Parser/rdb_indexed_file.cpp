@@ -4,6 +4,7 @@
 #include <cstring>
 #include <limits>
 #include <stdexcept>
+#include <utility>
 
 namespace rdb {
 namespace {
@@ -258,15 +259,37 @@ void store_detail(Database& database,
 } // namespace
 
 IndexedRdbFile::IndexedRdbFile(const std::string& path, const FastCheckIndexOptions& options)
-    : file_(path),
-      file_state_(file_.state()),
+    : file_(std::make_shared<detail::MappedFile>(path)),
+      file_state_(file_->state()),
       database_(database_from_index(
-          FastCheckIndexParser().parse_database(file_.descriptor(), options))) {
+          FastCheckIndexParser().parse_database(file_->descriptor(), options))) {
     verify_file_unchanged();
 }
 
+IndexedRdbFile& IndexedRdbFile::operator=(IndexedRdbFile other) noexcept {
+    swap(other);
+    return *this;
+}
+
+void IndexedRdbFile::swap(IndexedRdbFile& other) noexcept {
+    file_.swap(other.file_);
+    using std::swap;
+    swap(file_state_, other.file_state_);
+    database_.strings.swap(other.database_.strings);
+    swap(database_.top_cell_name, other.database_.top_cell_name);
+    swap(database_.database_precision, other.database_.database_precision);
+    database_.rule_checks.swap(other.database_.rule_checks);
+    database_.results.swap(other.database_.results);
+    database_.vertices.swap(other.database_.vertices);
+    database_.edges.swap(other.database_.edges);
+    database_.tagged_values.swap(other.database_.tagged_values);
+    database_.check_text_lines.swap(other.database_.check_text_lines);
+    swap(database_.loaded_rule_check_count, other.database_.loaded_rule_check_count);
+    tag_names_.swap(other.tag_names_);
+}
+
 void IndexedRdbFile::verify_file_unchanged() {
-    const detail::FileState current = file_.state();
+    const detail::FileState current = file_->state();
     if (detail::same_file_snapshot(file_state_, current)) return;
     if (detail::same_file_after_path_replacement(file_state_, current)) {
         file_state_ = current;
@@ -279,7 +302,7 @@ const RuleCheck& IndexedRdbFile::load_check(CheckId id) {
     verify_file_unchanged();
     const RuleCheck& selected = database_.check(id);
     if (!selected.detail_loaded) {
-        const CheckDetail detail = detail::parse_check_detail(file_, selected.offset);
+        const CheckDetail detail = detail::parse_check_detail(*file_, selected.offset);
         verify_file_unchanged();
         store_detail(database_, tag_names_, id, detail);
     }
