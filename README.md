@@ -5,6 +5,7 @@ ASCII Results Database(RDB)를 읽는 C++11 파서다.
 ## 구성
 
 - `Parser/` — 전체 RDB 파서, 빠른 Check index, 선택 Check detail
+- `examples/rdb_indexed_example.cpp` — index, 선택 detail, geometry/property 순회 예시
 - `*_sample.rdb` — 파서 자동 테스트용 fixture
 
 대용량 RDB의 Check 탐색에는 다음 두 파서를 사용한다.
@@ -32,6 +33,30 @@ if (!ids.empty()) {
 단, `TextView`는 내부 byte pool을 빌려 보므로 이후 `load_check()`/`load_all()`이 pool을
 재할당하면 무효화될 수 있다. 문자열이 다시 필요할 때 해당 accessor로 새 view를 얻거나
 `str()`로 복사해야 한다.
+
+## 사용 예시 실행
+
+`rdb-indexed-example`은 다음 흐름을 한 번에 보여 준다.
+
+1. 파일 전체의 Check 이름과 offset을 index
+2. 이름으로 Check 검색
+3. 선택 Check만 `load_check()`로 상세 파싱
+4. Result, Property, Polygon vertex, Edge 순회
+5. compact storage 메모리 사용량 출력
+
+```bash
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build -j
+
+# Check 이름을 생략하면 첫 번째 Check를 선택한다.
+./build/examples/rdb-indexed-example standard_sample.rdb
+
+# 이름이 같은 Check가 여러 개면 첫 번째 항목을 선택한다.
+./build/examples/rdb-indexed-example standard_sample.rdb M1.SPACING.1
+```
+
+프로그램 전체 코드는 [`examples/rdb_indexed_example.cpp`](examples/rdb_indexed_example.cpp)에
+있으며, 잘못된 인자, 찾을 수 없는 Check, RDB 파싱 오류도 종료 코드와 오류 메시지로 처리한다.
 
 메모리를 줄이기 위해 check 이름/offset 검색과 tag-name interning은 보조 hash map 없이
 선형 탐색한다(각각 check 수와 고유 tag-name 수에 대해 O(n)). `memory_usage()`는 compact
