@@ -1,15 +1,14 @@
-add_library(ascii_rdb_parser
-    ascii_rdb_parser.cpp
+add_library(rdb_indexed_file
     rdb_indexed_file.cpp
 )
-target_include_directories(ascii_rdb_parser PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_compile_options(ascii_rdb_parser PRIVATE
+target_include_directories(rdb_indexed_file PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_compile_options(rdb_indexed_file PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>
 )
 
 if(BUILD_TESTING)
     add_executable(rdb-parser-tests rdb_parser_tests.cpp)
-    target_link_libraries(rdb-parser-tests PRIVATE ascii_rdb_parser)
+    target_link_libraries(rdb-parser-tests PRIVATE rdb_indexed_file)
     target_compile_options(rdb-parser-tests PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>
     )
@@ -23,7 +22,7 @@ if(BUILD_TESTING)
     add_test(NAME rdb-check-index-header-test COMMAND rdb-check-index-header-test)
 
     add_executable(rdb-unified-database-test rdb_unified_database_test.cpp)
-    target_link_libraries(rdb-unified-database-test PRIVATE ascii_rdb_parser)
+    target_link_libraries(rdb-unified-database-test PRIVATE rdb_indexed_file)
     target_compile_options(rdb-unified-database-test PRIVATE
         $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic;-Werror>
     )

@@ -1,15 +1,14 @@
-#include "ascii_rdb_parser.hpp"
 #include "rdb_check_detail.hpp"
 #include "rdb_check_index.hpp"
 
 #include <cstdlib>
-#include <cstdio>
 #include <fcntl.h>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <unistd.h>
+#include <vector>
 
 namespace {
 
@@ -24,10 +23,6 @@ void check(bool condition, const char* expression) {
 
 std::string sample_path(const char* name) {
     return std::string(RDB_SAMPLE_DIR) + "/" + name;
-}
-
-std::string text(const rdb::Database& database, rdb::StringId id) {
-    return database.strings.get(id).str();
 }
 
 class TemporaryRdb {
@@ -62,128 +57,9 @@ private:
     std::string path_;
 };
 
-const rdb::RuleCheck& rule(const rdb::Database& database, std::size_t index) {
-    return database.rule_checks[index];
-}
-
-const rdb::Result& result(const rdb::Database& database,
-                          const rdb::RuleCheck& rule_check,
-                                   std::size_t index) {
-    return database.results[rule_check.results.begin + index];
-}
-
 } // namespace
 
 int main() {
-    const rdb::AsciiRdbParser parser;
-
-    rdb::ParseOptions full_cancel_options;
-    full_cancel_options.is_cancelled = []() { return true; };
-    bool full_parse_cancelled = false;
-    try {
-        parser.parse_file(sample_path("large_standard_sample.rdb"), full_cancel_options);
-    } catch (const rdb::ParseCancelled&) {
-        full_parse_cancelled = true;
-    }
-    RDB_CHECK(full_parse_cancelled);
-
-    const rdb::Database standard = parser.parse_file(sample_path("standard_sample.rdb"));
-    RDB_CHECK(text(standard, standard.top_cell_name) == "TOP_CHIP");
-    RDB_CHECK(standard.database_precision == 1000);
-    RDB_CHECK(standard.rule_checks.size() == 3);
-    RDB_CHECK(standard.loaded_check_count() == 3U);
-    RDB_CHECK(text(standard, rule(standard, 0).name) == "M1.SPACING.1");
-    RDB_CHECK(rule(standard, 0).offset == 14U);
-    RDB_CHECK(rule(standard, 0).detail_loaded);
-    RDB_CHECK(rule(standard, 0).declared_check_text_count == 3U);
-    RDB_CHECK(text(standard, rule(standard, 0).comment) ==
-        "Rule File Pathname: ./demo.svrf\n"
-        "Rule File Title: Example DRC deck\n"
-        "M1 spacing must be at least 0.14 um.");
-    RDB_CHECK(rule(standard, 0).check_text.count == 3);
-    RDB_CHECK(rule(standard, 0).results.count == 2);
-    RDB_CHECK(result(standard, rule(standard, 0), 0).kind == rdb::ResultKind::Polygon);
-    RDB_CHECK(result(standard, rule(standard, 0), 0).geometry.count == 4);
-    RDB_CHECK(result(standard, rule(standard, 0), 0).properties.count == 5);
-    RDB_CHECK(text(standard, standard.tagged_values[
-        result(standard, rule(standard, 0), 0).properties.begin].id) == "PP");
-    RDB_CHECK(text(standard, standard.tagged_values[
-        result(standard, rule(standard, 0), 0).properties.begin].payload) == "M1 spacing marker");
-    RDB_CHECK(standard.vertices[0].x == 10000);
-    RDB_CHECK(standard.vertices[0].y == 20000);
-    RDB_CHECK(result(standard, rule(standard, 0), 1).kind == rdb::ResultKind::EdgeCluster);
-    RDB_CHECK(result(standard, rule(standard, 0), 1).geometry.count == 2);
-    RDB_CHECK(result(standard, rule(standard, 1), 0).properties.count == 2);
-    RDB_CHECK(rule(standard, 2).results.empty());
-
-    const rdb::Database post_geometry =
-        parser.parse_file(sample_path("post_coordinate_tags_sample.rdb"));
-    RDB_CHECK(post_geometry.rule_checks.size() == 1);
-    RDB_CHECK(rule(post_geometry, 0).results.count == 2);
-    RDB_CHECK(result(post_geometry, rule(post_geometry, 0), 0).properties.count == 2);
-    RDB_CHECK(result(post_geometry, rule(post_geometry, 0), 1).properties.count == 3);
-
-    // Full Database Result도 좌표 전/사이/후 property를 발견 순서대로 하나의 Range에 보관한다.
-    const TemporaryRdb mixed_full_property_file(
-        "TOP 1000\nMIXED.FULL.PROPERTIES\n1 1 0 Jul 21 10:35:00 2026\n"
-        "p 1 2\nPB before geometry\n0 0\nPM between coordinates\n1 1\nPA after geometry\n");
-    const rdb::Database mixed_full_properties =
-        parser.parse_file(mixed_full_property_file.path());
-    const rdb::Result& mixed_full_result =
-        result(mixed_full_properties, rule(mixed_full_properties, 0), 0);
-    RDB_CHECK(mixed_full_result.properties.count == 3U);
-    const rdb::Index mixed_property_begin = mixed_full_result.properties.begin;
-    RDB_CHECK(text(mixed_full_properties,
-                   mixed_full_properties.tagged_values[mixed_property_begin].id) == "PB");
-    RDB_CHECK(text(mixed_full_properties,
-                   mixed_full_properties.tagged_values[mixed_property_begin].payload) ==
-              "before geometry");
-    RDB_CHECK(text(mixed_full_properties,
-                   mixed_full_properties.tagged_values[mixed_property_begin + 1U].id) == "PM");
-    RDB_CHECK(text(mixed_full_properties,
-                   mixed_full_properties.tagged_values[mixed_property_begin + 2U].id) == "PA");
-    RDB_CHECK(text(mixed_full_properties,
-                   mixed_full_properties.tagged_values[mixed_property_begin + 2U].payload) ==
-              "after geometry");
-
-    // Final tail lookahead가 reader buffer를 교체해도 property 원문과 순서를 보존해야 한다.
-    const std::string long_tail_payload(200U, 'x');
-    const TemporaryRdb overflow_tail_file(
-        std::string("TOP 1000\nOVERFLOW.TAIL\n1 1 0 Jul 21 10:35:00 2026\n") +
-        "p 1 1\n0 0\nXL " + long_tail_payload + "\nLAST final-value");
-    rdb::ParseOptions overflow_tail_options;
-    overflow_tail_options.read_buffer_bytes = 17U;
-    const rdb::Database overflow_tail =
-        parser.parse_file(overflow_tail_file.path(), overflow_tail_options);
-    const rdb::Result& overflow_tail_result =
-        result(overflow_tail, rule(overflow_tail, 0), 0);
-    RDB_CHECK(overflow_tail_result.properties.count == 2U);
-    const rdb::Index overflow_property_begin = overflow_tail_result.properties.begin;
-    RDB_CHECK(text(overflow_tail,
-                   overflow_tail.tagged_values[overflow_property_begin].id) == "XL");
-    RDB_CHECK(text(overflow_tail,
-                   overflow_tail.tagged_values[overflow_property_begin].payload) ==
-              long_tail_payload);
-    RDB_CHECK(text(overflow_tail,
-                   overflow_tail.tagged_values[overflow_property_begin + 1U].id) == "LAST");
-    RDB_CHECK(text(overflow_tail,
-                   overflow_tail.tagged_values[overflow_property_begin + 1U].payload) ==
-              "final-value");
-
-    const rdb::Database large_standard =
-        parser.parse_file(sample_path("large_standard_sample.rdb"));
-    RDB_CHECK(large_standard.rule_checks.size() == 100);
-    RDB_CHECK(large_standard.results.size() == 200);
-    RDB_CHECK(large_standard.vertices.size() == 400);
-    RDB_CHECK(large_standard.edges.size() == 200);
-
-    const rdb::Database large_post_geometry =
-        parser.parse_file(sample_path("large_post_coordinate_tags_sample.rdb"));
-    RDB_CHECK(large_post_geometry.rule_checks.size() == 100);
-    RDB_CHECK(large_post_geometry.results.size() == 200);
-    RDB_CHECK(large_post_geometry.vertices.size() == 400);
-    RDB_CHECK(large_post_geometry.edges.size() == 200);
-
     const rdb::FastCheckIndexParser index_parser;
 
     rdb::FastCheckIndexOptions index_cancel_options;

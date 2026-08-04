@@ -1,5 +1,5 @@
 add_executable(rdb-database-example rdb_database_example.cpp)
-target_link_libraries(rdb-database-example PRIVATE ascii_rdb_parser)
+target_link_libraries(rdb-database-example PRIVATE rdb_indexed_file)
 target_compile_options(rdb-database-example PRIVATE
     $<$<CXX_COMPILER_ID:GNU,Clang>:-Wall;-Wextra;-Wpedantic>
 )

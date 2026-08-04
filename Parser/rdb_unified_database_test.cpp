@@ -1,4 +1,3 @@
-#include "ascii_rdb_parser.hpp"
 #include "rdb_indexed_file.hpp"
 
 #include <cstdio>
@@ -9,6 +8,7 @@
 #include <string>
 #include <type_traits>
 #include <unistd.h>
+#include <utility>
 #include <vector>
 
 namespace {
@@ -169,10 +169,6 @@ int main() {
     RDB_CHECK(all_file.database().loaded_check_count() == 3U);
 
     const TemporaryRdb decimal_header("TOP_DECIMAL 1.25e-3\n");
-    const rdb::Database full_decimal =
-        rdb::AsciiRdbParser().parse_file(decimal_header.path());
-    RDB_CHECK(full_decimal.database_precision == 1.25e-3);
-    RDB_CHECK(full_decimal.loaded_check_count() == 0U);
     const rdb::IndexedRdbFile indexed_decimal(decimal_header.path());
     RDB_CHECK(indexed_decimal.database().database_precision == 1.25e-3);
     RDB_CHECK(indexed_decimal.database().check_count() == 0U);
@@ -180,26 +176,18 @@ int main() {
     const TemporaryRdb pre_signature_property(
         "TOP 1000\nPRE.SIGNATURE\n1 1 0 Jul 21 10:35:00 2026\n"
         "PB before-signature\np 1 1\n3 4\nPA after-geometry\n");
-    const rdb::Database full_pre_signature =
-        rdb::AsciiRdbParser().parse_file(pre_signature_property.path());
-    RDB_CHECK(full_pre_signature.results[0].properties.count == 2U);
-    RDB_CHECK(text(full_pre_signature,
-                   full_pre_signature.tagged_values[
-                       full_pre_signature.results[0].properties.begin].id) == "PB");
     rdb::IndexedRdbFile indexed_pre_signature(pre_signature_property.path());
     indexed_pre_signature.load_all();
-    RDB_CHECK(indexed_pre_signature.database().results[0].properties.count == 2U);
+    const rdb::Database& pre_database = indexed_pre_signature.database();
+    RDB_CHECK(pre_database.results[0].properties.count == 2U);
+    const rdb::TaggedValue& pre_property =
+        pre_database.tagged_values[pre_database.results[0].properties.begin];
+    RDB_CHECK(text(pre_database, pre_property.id) == "PB");
+    RDB_CHECK(text(pre_database, pre_property.payload) == "before-signature");
 
     const TemporaryRdb invalid_counts(
         "TOP 1000\nINVALID.COUNTS\n2 1 0 Jul 21 10:35:00 2026\n"
         "p 1 1\n0 0\np 2 1\n1 1\n");
-    bool full_counts_rejected = false;
-    try {
-        (void)rdb::AsciiRdbParser().parse_file(invalid_counts.path());
-    } catch (const rdb::ParseError&) {
-        full_counts_rejected = true;
-    }
-    RDB_CHECK(full_counts_rejected);
     bool indexed_counts_rejected = false;
     try {
         (void)rdb::IndexedRdbFile(invalid_counts.path());
