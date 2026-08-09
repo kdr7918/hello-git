@@ -3,21 +3,17 @@
 
 #include "ascii_rdb.hpp"
 
-#include <cerrno>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
-#include <fcntl.h>
+#include <fstream>
 #include <functional>
 #include <limits>
 #include <locale>
 #include <sstream>
 #include <stdexcept>
 #include <string>
-#include <sys/mman.h>
-#include <sys/stat.h>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -89,69 +85,17 @@ struct FastCheckIndexOptions {
 
 namespace detail {
 
-struct FileState {
-    dev_t device;
-    ino_t inode;
-    nlink_t link_count;
-    off_t size;
-    time_t modified_seconds;
-    long modified_nanoseconds;
-    time_t changed_seconds;
-    long changed_nanoseconds;
-};
-
-inline FileState capture_file_state(int fd) {
-    struct stat status;
-    if (::fstat(fd, &status) != 0) {
-        throw std::runtime_error(
-            "cannot stat RDB file: " + std::string(std::strerror(errno)));
+inline std::uint64_t standard_file_size(const std::string& path) {
+    std::ifstream input(path.c_str(), std::ios::binary | std::ios::ate);
+    if (!input) {
+        throw std::runtime_error("cannot open RDB file '" + path + "'");
     }
-
-    FileState state;
-    state.device = status.st_dev;
-    state.inode = status.st_ino;
-    state.link_count = status.st_nlink;
-    state.size = status.st_size;
-#if defined(__APPLE__)
-    state.modified_seconds = status.st_mtimespec.tv_sec;
-    state.modified_nanoseconds = status.st_mtimespec.tv_nsec;
-    state.changed_seconds = status.st_ctimespec.tv_sec;
-    state.changed_nanoseconds = status.st_ctimespec.tv_nsec;
-#else
-    state.modified_seconds = status.st_mtim.tv_sec;
-    state.modified_nanoseconds = status.st_mtim.tv_nsec;
-    state.changed_seconds = status.st_ctim.tv_sec;
-    state.changed_nanoseconds = status.st_ctim.tv_nsec;
-#endif
-    return state;
-}
-
-inline bool same_file_state(const FileState& left, const FileState& right) {
-    return left.device == right.device &&
-           left.inode == right.inode &&
-           left.link_count == right.link_count &&
-           left.size == right.size &&
-           left.modified_seconds == right.modified_seconds &&
-           left.modified_nanoseconds == right.modified_nanoseconds &&
-           left.changed_seconds == right.changed_seconds &&
-           left.changed_nanoseconds == right.changed_nanoseconds;
-}
-
-// Exact metadata equality for a stable open-file snapshot.
-inline bool same_file_snapshot(const FileState& left, const FileState& right) {
-    return same_file_state(left, right);
-}
-
-// Replacing the pathname can unlink the already-open inode without changing its
-// bytes. Accept that one metadata transition, then rebase the snapshot state.
-inline bool same_file_after_path_replacement(const FileState& left,
-                                             const FileState& right) {
-    return left.device == right.device &&
-           left.inode == right.inode &&
-           right.link_count < left.link_count &&
-           left.size == right.size &&
-           left.modified_seconds == right.modified_seconds &&
-           left.modified_nanoseconds == right.modified_nanoseconds;
+    const std::ifstream::pos_type end = input.tellg();
+    if (end == std::ifstream::pos_type(-1)) {
+        throw std::runtime_error("cannot determine RDB file size for '" + path + "'");
+    }
+    return static_cast<std::uint64_t>(
+        static_cast<std::streamoff>(end));
 }
 
 // 파일 버퍼를 복사하지 않고 [begin, end) 포인터 두 개로 표현한 문자열 조각이다.
@@ -241,71 +185,60 @@ struct Line {
     CheckOffset offset;
 };
 
-// OS의 mmap으로 파일 내용을 가상 메모리에 연결한다.
-// 실제 페이지는 접근할 때만 읽히므로 수십 GB 파일도 한 번에 복사하지 않는다.
-class MappedFile {
+// 표준 C++ 스트림으로 파일을 읽어 Parser가 사용하는 연속 메모리를 제공한다.
+class FileBuffer {
 public:
-    explicit MappedFile(const std::string& path) : fd_(-1), data_(0), size_(0) {
-        fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd_ < 0) {
-            throw std::runtime_error("cannot open RDB file '" + path + "': " + std::strerror(errno));
+    explicit FileBuffer(const std::string& path)
+        : path_(path) {
+        const std::uint64_t fileSize = standard_file_size(path);
+        if (fileSize > static_cast<std::uint64_t>(bytes_.max_size())) {
+            throw std::length_error("RDB file cannot fit in this process");
         }
+        bytes_.resize(static_cast<std::size_t>(fileSize));
+        if (bytes_.empty()) return;
 
-        struct stat status;
-        if (::fstat(fd_, &status) != 0) {
-            const std::string reason = std::strerror(errno);
-            ::close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("cannot stat RDB file '" + path + "': " + reason);
+        std::ifstream input(path.c_str(), std::ios::binary);
+        if (!input) {
+            throw std::runtime_error("cannot open RDB file '" + path + "'");
         }
-        if (status.st_size < 0 || static_cast<std::uintmax_t>(status.st_size) >
-                                  static_cast<std::uintmax_t>(std::numeric_limits<std::size_t>::max())) {
-            ::close(fd_);
-            fd_ = -1;
-            throw std::length_error("RDB file cannot be mapped in this process");
+        std::size_t offset = 0U;
+        const std::size_t maximumChunk = static_cast<std::size_t>(
+            std::numeric_limits<std::streamsize>::max());
+        while (offset < bytes_.size()) {
+            const std::size_t remaining = bytes_.size() - offset;
+            const std::size_t chunk =
+                remaining < maximumChunk ? remaining : maximumChunk;
+            input.read(&bytes_[offset], static_cast<std::streamsize>(chunk));
+            if (input.gcount() != static_cast<std::streamsize>(chunk)) {
+                throw std::runtime_error(
+                    "cannot read complete RDB file '" + path + "'");
+            }
+            offset += chunk;
         }
-
-        size_ = static_cast<std::size_t>(status.st_size);
-        if (size_ == 0) return;
-
-        void* mapping = ::mmap(0, size_, PROT_READ, MAP_PRIVATE, fd_, 0);
-        if (mapping == MAP_FAILED) {
-            const std::string reason = std::strerror(errno);
-            ::close(fd_);
-            fd_ = -1;
-            throw std::runtime_error("cannot map RDB file '" + path + "': " + reason);
-        }
-        data_ = static_cast<const char*>(mapping);
-#ifdef POSIX_MADV_SEQUENTIAL
-        // 커널에 앞에서 뒤로 한 번 읽는 패턴임을 알려 캐시 동작을 돕는다.
-        (void)::posix_madvise(const_cast<char*>(data_), size_, POSIX_MADV_SEQUENTIAL);
-#endif
     }
 
-    ~MappedFile() {
-        if (data_ != 0) ::munmap(const_cast<char*>(data_), size_);
-        if (fd_ >= 0) ::close(fd_);
+    const char* data() const { return bytes_.empty() ? "" : &bytes_[0]; }
+    std::size_t size() const { return bytes_.size(); }
+    bool source_size_unchanged() const {
+        try {
+            return standard_file_size(path_) ==
+                static_cast<std::uint64_t>(bytes_.size());
+        } catch (...) {
+            return false;
+        }
     }
-
-    const char* data() const { return data_ != 0 ? data_ : ""; }
-    std::size_t size() const { return size_; }
-    // The descriptor remains owned by this object. Callers must not close it;
-    // consumers that outlive a call must duplicate it first.
-    int descriptor() const { return fd_; }
-    FileState state() const { return capture_file_state(fd_); }
 
 private:
-    MappedFile(const MappedFile&);
-    MappedFile& operator=(const MappedFile&);
+    FileBuffer(const FileBuffer&);
+    FileBuffer& operator=(const FileBuffer&);
 
-    int fd_;
-    const char* data_;
-    std::size_t size_;
+    std::string path_;
+    std::vector<char> bytes_;
 };
 
 class LineCursor {
 public:
-    explicit LineCursor(const MappedFile& file, CheckOffset start = 0)
+    explicit LineCursor(const FileBuffer& file, CheckOffset start = 0)
         : data_(file.data()), end_(file.data() + file.size()), position_(file.data() + checked_start(file, start)) {}
 
     bool next(Line& line) {
@@ -328,7 +261,7 @@ public:
     CheckOffset position() const { return static_cast<CheckOffset>(position_ - data_); }
 
 private:
-    static std::size_t checked_start(const MappedFile& file, CheckOffset start) {
+    static std::size_t checked_start(const FileBuffer& file, CheckOffset start) {
         if (start > static_cast<CheckOffset>(file.size())) {
             throw ScanError(start, "check offset lies beyond end of file");
         }
@@ -609,8 +542,10 @@ inline bool make_check_index_entry(const char* buffer_begin,
 class HeaderPatternIndexReader {
 public:
     HeaderPatternIndexReader(const std::string& path, const FastCheckIndexOptions& options)
-        : fd_(-1),
-          initial_state_(),
+        : path_(path),
+          stream_(path.c_str(), std::ios::binary),
+          random_stream_(path.c_str(), std::ios::binary),
+          initial_size_(0U),
           progress_callback_(options.progress_callback),
           cancellation_callback_(options.is_cancelled),
           last_progress_(-1),
@@ -625,66 +560,10 @@ public:
             throw std::length_error("fast RDB index buffer size overflows size_t");
         }
         buffer_.resize(options.read_buffer_bytes + options.context_bytes);
-
-        fd_ = ::open(path.c_str(), O_RDONLY | O_CLOEXEC);
-        if (fd_ < 0) {
-            throw std::runtime_error("cannot open RDB file '" + path + "': " + std::strerror(errno));
+        if (!stream_ || !random_stream_) {
+            throw std::runtime_error("cannot open RDB file '" + path + "'");
         }
-        try {
-            initial_state_ = capture_file_state(fd_);
-        } catch (...) {
-            ::close(fd_);
-            fd_ = -1;
-            throw;
-        }
-#ifdef POSIX_FADV_SEQUENTIAL
-        // 인덱스는 첫 바이트부터 한 번만 읽으므로 커널 readahead에 순차 접근을 알려 준다.
-        (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
-#endif
-    }
-
-    HeaderPatternIndexReader(int source_fd, const FastCheckIndexOptions& options)
-        : fd_(-1),
-          initial_state_(),
-          progress_callback_(options.progress_callback),
-          cancellation_callback_(options.is_cancelled),
-          last_progress_(-1),
-          context_bytes_(options.context_bytes),
-          buffer_offset_(0),
-          read_offset_(0),
-          buffer_starts_at_line_boundary_(true) {
-        if (source_fd < 0) throw std::invalid_argument("invalid RDB file descriptor");
-        if (options.read_buffer_bytes == 0 || options.context_bytes < 64U) {
-            throw std::invalid_argument("fast RDB index buffer/context size is too small");
-        }
-        if (options.read_buffer_bytes > std::numeric_limits<std::size_t>::max() - options.context_bytes) {
-            throw std::length_error("fast RDB index buffer size overflows size_t");
-        }
-        buffer_.resize(options.read_buffer_bytes + options.context_bytes);
-#ifdef F_DUPFD_CLOEXEC
-        fd_ = ::fcntl(source_fd, F_DUPFD_CLOEXEC, 0);
-#else
-        fd_ = ::dup(source_fd);
-        if (fd_ >= 0) (void)::fcntl(fd_, F_SETFD, FD_CLOEXEC);
-#endif
-        if (fd_ < 0) {
-            throw std::runtime_error(
-                "cannot duplicate RDB file descriptor: " + std::string(std::strerror(errno)));
-        }
-        try {
-            initial_state_ = capture_file_state(fd_);
-        } catch (...) {
-            ::close(fd_);
-            fd_ = -1;
-            throw;
-        }
-#ifdef POSIX_FADV_SEQUENTIAL
-        (void)::posix_fadvise(fd_, 0, 0, POSIX_FADV_SEQUENTIAL);
-#endif
-    }
-
-    ~HeaderPatternIndexReader() {
-        if (fd_ >= 0) ::close(fd_);
+        initial_size_ = standard_file_size(path);
     }
 
     CheckIndexDatabase run() {
@@ -700,7 +579,8 @@ public:
 
         for (;;) {
             check_cancelled();
-            const ssize_t received = read_block(&buffer_[carried], buffer_.size() - carried);
+            const std::streamsize received =
+                read_block(&buffer_[carried], buffer_.size() - carried);
             const bool eof = received == 0;
             const std::size_t total = carried + (received > 0 ? static_cast<std::size_t>(received) : 0U);
             if (received > 0) {
@@ -778,8 +658,8 @@ private:
     }
 
     void report_scan_progress(CheckOffset bytes_scanned) const {
-        if (!progress_callback_ || initial_state_.size <= 0) return;
-        const CheckOffset file_size = static_cast<CheckOffset>(initial_state_.size);
+        if (!progress_callback_ || initial_size_ == 0U) return;
+        const CheckOffset file_size = static_cast<CheckOffset>(initial_size_);
         if (bytes_scanned >= file_size) {
             report_progress(90);
             return;
@@ -801,8 +681,7 @@ private:
     }
 
     void verify_file_unchanged() const {
-        const FileState current_state = capture_file_state(fd_);
-        if (!same_file_state(initial_state_, current_state)) {
+        if (standard_file_size(path_) != initial_size_) {
             throw ScanError(0, "RDB file changed while fast indexing");
         }
     }
@@ -854,21 +733,30 @@ private:
         return lines_seen == expected_comments + 1U;
     }
 
-    ssize_t pread_block(char* destination,
-                        std::size_t capacity,
-                        CheckOffset offset) const {
-        if (offset > static_cast<CheckOffset>(std::numeric_limits<off_t>::max())) {
-            throw ScanError(offset, "comment offset exceeds platform file range");
+    std::streamsize pread_block(char* destination,
+                                std::size_t capacity,
+                                CheckOffset offset) const {
+        if (offset > static_cast<CheckOffset>(
+                         std::numeric_limits<std::streamoff>::max())) {
+            throw ScanError(offset, "comment offset exceeds stream range");
         }
-        for (;;) {
-            const ssize_t received =
-                ::pread(fd_, destination, capacity, static_cast<off_t>(offset));
-            if (received >= 0) return received;
-            if (errno != EINTR) {
-                throw std::runtime_error(
-                    "cannot read RDB comments: " + std::string(std::strerror(errno)));
-            }
+        const std::size_t maximum = static_cast<std::size_t>(
+            std::numeric_limits<std::streamsize>::max());
+        const std::size_t request =
+            capacity < maximum ? capacity : maximum;
+        random_stream_.clear();
+        random_stream_.seekg(
+            static_cast<std::streamoff>(offset), std::ios::beg);
+        if (!random_stream_) {
+            throw std::runtime_error("cannot seek RDB comments");
         }
+        random_stream_.read(
+            destination, static_cast<std::streamsize>(request));
+        const std::streamsize received = random_stream_.gcount();
+        if (random_stream_.bad()) {
+            throw std::runtime_error("cannot read RDB comments");
+        }
+        return received;
     }
 
     CheckOffset populate_entry_comments(
@@ -888,7 +776,8 @@ private:
 
         for (;;) {
             check_cancelled();
-            const ssize_t received = pread_block(&block[0], block.size(), offset);
+            const std::streamsize received =
+                pread_block(&block[0], block.size(), offset);
             if (received == 0) {
                 if (!line.empty() &&
                     finish_comment_line(entry, expected_comments, lines_seen, line)) {
@@ -938,21 +827,18 @@ private:
         database.checks.swap(filtered_checks);
     }
 
-    ssize_t read_block(char* destination, std::size_t capacity) {
-        if (read_offset_ > static_cast<CheckOffset>(std::numeric_limits<off_t>::max())) {
-            throw ScanError(read_offset_, "RDB read offset exceeds platform file range");
+    std::streamsize read_block(char* destination, std::size_t capacity) {
+        const std::size_t maximum = static_cast<std::size_t>(
+            std::numeric_limits<std::streamsize>::max());
+        const std::size_t request =
+            capacity < maximum ? capacity : maximum;
+        stream_.read(destination, static_cast<std::streamsize>(request));
+        const std::streamsize received = stream_.gcount();
+        if (stream_.bad()) {
+            throw std::runtime_error("cannot read RDB file");
         }
-        for (;;) {
-            const ssize_t received =
-                ::pread(fd_, destination, capacity, static_cast<off_t>(read_offset_));
-            if (received >= 0) {
-                read_offset_ += static_cast<CheckOffset>(received);
-                return received;
-            }
-            if (errno != EINTR) {
-                throw std::runtime_error("cannot read RDB file: " + std::string(std::strerror(errno)));
-            }
-        }
+        read_offset_ += static_cast<CheckOffset>(received);
+        return received;
     }
 
     void scan_headers(std::size_t total_size,
@@ -987,8 +873,10 @@ private:
     HeaderPatternIndexReader(const HeaderPatternIndexReader&);
     HeaderPatternIndexReader& operator=(const HeaderPatternIndexReader&);
 
-    int fd_;
-    FileState initial_state_;
+    std::string path_;
+    std::ifstream stream_;
+    mutable std::ifstream random_stream_;
+    std::uint64_t initial_size_;
     FastCheckIndexProgressCallback progress_callback_;
     FastCheckIndexCancellationCallback cancellation_callback_;
     mutable int last_progress_;
@@ -1034,14 +922,6 @@ public:
         return detail::HeaderPatternIndexReader(path, options).run();
     }
 
-    // Duplicates fd and scans that exact open file, independent of path replacement.
-    // pread is used so the caller's descriptor offset is not changed.
-    CheckIndexDatabase parse_database(
-        int fd,
-        const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
-        return detail::HeaderPatternIndexReader(fd, options).run();
-    }
-
     // 기존 Check 목록 전용 API를 유지한다.
     std::vector<CheckIndexEntry> parse_file(
         const std::string& path,
@@ -1049,11 +929,6 @@ public:
         return parse_database(path, options).checks;
     }
 
-    std::vector<CheckIndexEntry> parse_file(
-        int fd,
-        const FastCheckIndexOptions& options = FastCheckIndexOptions()) const {
-        return parse_database(fd, options).checks;
-    }
 };
 
 } // namespace rdb

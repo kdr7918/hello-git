@@ -21,8 +21,9 @@ Compact Database나 detail 전용 최종 모델은 없다.
 
 ## Check index + Detail append
 
-대용량 파일에서는 `IndexedRdbFile`을 사용한다. 이 클래스는 open-file snapshot과 mmap
-수명만 관리하며, index와 detail 데이터는 모두 내부의 canonical `Database`에 기록한다.
+대용량 파일에서는 `IndexedRdbFile`을 사용한다. 이 클래스는 표준 C++ 스트림으로 읽은
+file-byte snapshot을 관리하며, index와 detail 데이터는 모두 내부의 canonical
+`Database`에 기록한다.
 
 ```cpp
 #include "rdb_indexed_file.hpp"
@@ -74,9 +75,15 @@ if (!ids.empty()) {
 `Database`에 완성한다. Result가 0개인 Check도 `detail_loaded`로 index-only 상태와
 구분한다.
 
+MainWindow 앱은 Check index가 준비되면 하나의 백그라운드 스레드에서 모든 Check의
+Detail을 파일 순서대로 미리 읽는다. 완성된 Check는 같은 `Database`에 캐시되므로
+Table Row를 선택할 때 다시 파싱하지 않는다. 아직 순서가 오지 않은 Check를 선택하면
+추가 파서를 만들지 않고 백그라운드 작업을 기다리며, 현재 파싱 중인 Check는
+10,000 Result 단위로 화면에 반영한다.
+
 ## 백그라운드 full parse 후 교체
 
-`IndexedRdbFile` 복사는 같은 open inode와 mmap 수명만 공유하고 `Database`와 tag parser
+`IndexedRdbFile` 복사는 같은 immutable file-byte buffer를 공유하고 `Database`와 tag parser
 상태는 독립적으로 깊은 복사한다. 따라서 복사가 완료된 뒤 서로 다른 복사본에서
 `load_check()`를 호출해도 상대 복사본의 Database는 변경되지 않는다.
 
@@ -107,9 +114,8 @@ active = pending.get();
 event-loop handoff 등으로 기존 reader가 없는 시점에 교체해야 하며, 대입하면 기존
 `database()`에서 얻은 참조·포인터·iterator는 모두 무효화된다.
 
-공유 mmap은 파일 바이트를 별도 복제한 immutable snapshot이 아니다. lazy parse가 끝날 때까지
-backing inode를 제자리 수정하거나 truncate하면 안 된다. pathname 갱신은 기존 inode를 건드리지
-않는 rename 기반 원자 교체를 사용해야 한다.
+file-byte buffer는 생성 시점의 내용을 소유하므로 이후 detail 파싱은 동일한 immutable
+snapshot을 사용한다. 표준 C++11만 사용하므로 파일 변경 검증은 크기 변화를 기준으로 한다.
 
 ## 수명과 순서
 
@@ -118,8 +124,7 @@ backing inode를 제자리 수정하거나 truncate하면 안 된다. pathname �
 - 선택 load 시 전역 pool의 물리적 순서는 load 순서일 수 있으므로 항상 `Range`로 순회한다.
 - `StringId`, `CheckId`, 복사한 `Range`, 복사한 `Point`/`Edge`는 안정적이다.
 - `StringRef`, vector 참조·포인터·iterator는 이후 `load_check()`의 재할당으로 무효화될 수 있다.
-- pathname이 다른 파일로 교체돼도 이미 연 snapshot을 유지하며, 같은 inode의 변경은
-  detail 저장 전에 거부한다.
+- pathname이 다른 파일로 교체돼도 이미 읽은 file-byte snapshot은 유지된다.
 
 ## 사용 예시 실행
 

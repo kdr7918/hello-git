@@ -70,7 +70,7 @@ struct CheckDetailBatchResult {
 namespace detail {
 
 inline std::string as_string(Span value) {
-    // mmap 파일을 닫은 뒤에도 문자열을 사용할 수 있도록 필요한 경우에만 복사한다.
+    // 원본 파일 buffer 수명과 분리하기 위해 필요한 문자열만 복사한다.
     return std::string(value.begin, value.size());
 }
 
@@ -81,7 +81,11 @@ inline DetailTag parse_detail_tag(Span text) {
     if (!next_word(cursor, id)) throw std::logic_error("empty tag passed to parse_detail_tag");
     DetailTag tag;
     tag.id.assign(id.begin, id.size());
-    const Span payload = trim(cursor);
+    Span payload = trim(cursor);
+    if (id.size() == 2U && id.begin[0] == 'C' && id.begin[1] == 'N') {
+        Span cell_name;
+        if (next_word(payload, cell_name)) payload = cell_name;
+    }
     tag.payload.assign(payload.begin, payload.size());
     return tag;
 }
@@ -181,9 +185,9 @@ inline void reject_undeclared_result_after_empty_check(LineCursor& cursor) {
     }
 }
 
-// 실제 상세 파싱 본문이다. MappedFile을 인자로 받아, 일회성 파서와 재사용 세션이 같은
+// 실제 상세 파싱 본문이다. FileBuffer를 인자로 받아, 일회성 파서와 재사용 세션이 같은
 // 구현을 공유하게 한다.
-inline CheckDetail parse_check_detail(const MappedFile& file, CheckOffset offset) {
+inline CheckDetail parse_check_detail(const FileBuffer& file, CheckOffset offset) {
     LineCursor cursor(file, offset);
 
     Line name_line;
@@ -354,7 +358,7 @@ inline bool consume_detail_final_tail_cancellable(
 }
 
 inline CheckDetailBatchResult parse_check_detail_batches(
-    const MappedFile& file,
+    const FileBuffer& file,
     CheckOffset offset,
     const CheckDetailBatchOptions& options) {
     if (options.batch_size == 0U) {
@@ -464,11 +468,17 @@ public:
         return detail::parse_check_detail(file_, offset);
     }
 
+    CheckDetailBatchResult parse_at_batches(
+        CheckOffset offset,
+        const CheckDetailBatchOptions& options) const {
+        return detail::parse_check_detail_batches(file_, offset, options);
+    }
+
 private:
     CheckDetailFile(const CheckDetailFile&);
     CheckDetailFile& operator=(const CheckDetailFile&);
 
-    detail::MappedFile file_;
+    detail::FileBuffer file_;
 };
 
 /*
@@ -480,7 +490,7 @@ private:
 class CheckDetailParser {
 public:
     CheckDetail parse_file_at(const std::string& path, CheckOffset offset) const {
-        detail::MappedFile file(path);
+        detail::FileBuffer file(path);
         return detail::parse_check_detail(file, offset);
     }
 
@@ -488,7 +498,7 @@ public:
         const std::string& path,
         CheckOffset offset,
         const CheckDetailBatchOptions& options) const {
-        detail::MappedFile file(path);
+        detail::FileBuffer file(path);
         return detail::parse_check_detail_batches(file, offset, options);
     }
 };

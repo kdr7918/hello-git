@@ -259,10 +259,9 @@ void store_detail(Database& database,
 } // namespace
 
 IndexedRdbFile::IndexedRdbFile(const std::string& path, const FastCheckIndexOptions& options)
-    : file_(std::make_shared<detail::MappedFile>(path)),
-      file_state_(file_->state()),
+    : file_(std::make_shared<detail::FileBuffer>(path)),
       database_(database_from_index(
-          FastCheckIndexParser().parse_database(file_->descriptor(), options))) {
+          FastCheckIndexParser().parse_database(path, options))) {
     verify_file_unchanged();
 }
 
@@ -274,7 +273,6 @@ IndexedRdbFile& IndexedRdbFile::operator=(IndexedRdbFile other) noexcept {
 void IndexedRdbFile::swap(IndexedRdbFile& other) noexcept {
     file_.swap(other.file_);
     using std::swap;
-    swap(file_state_, other.file_state_);
     database_.strings.swap(other.database_.strings);
     swap(database_.top_cell_name, other.database_.top_cell_name);
     swap(database_.database_precision, other.database_.database_precision);
@@ -289,13 +287,9 @@ void IndexedRdbFile::swap(IndexedRdbFile& other) noexcept {
 }
 
 void IndexedRdbFile::verify_file_unchanged() {
-    const detail::FileState current = file_->state();
-    if (detail::same_file_snapshot(file_state_, current)) return;
-    if (detail::same_file_after_path_replacement(file_state_, current)) {
-        file_state_ = current;
-        return;
+    if (!file_->source_size_unchanged()) {
+        throw ScanError(0, "RDB file size changed after snapshot was opened");
     }
-    throw ScanError(0, "RDB file changed after indexed snapshot was opened");
 }
 
 const RuleCheck& IndexedRdbFile::load_check(CheckId id) {

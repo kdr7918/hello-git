@@ -1,13 +1,12 @@
 #include "rdb_check_detail.hpp"
 #include "rdb_check_index.hpp"
+#include "test_temporary_rdb.hpp"
 
 #include <cstdlib>
-#include <fcntl.h>
 #include <iostream>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-#include <unistd.h>
 #include <vector>
 
 namespace {
@@ -25,36 +24,10 @@ std::string sample_path(const char* name) {
     return std::string(RDB_SAMPLE_DIR) + "/" + name;
 }
 
-class TemporaryRdb {
+class TemporaryRdb : public rdb_test::TemporaryRdb {
 public:
-    explicit TemporaryRdb(const std::string& contents) {
-        char pattern[] = "/tmp/rdb-parser-test-XXXXXX";
-        const int fd = ::mkstemp(pattern);
-        if (fd < 0) throw std::runtime_error("mkstemp failed");
-        path_ = pattern;
-        std::size_t written = 0;
-        while (written < contents.size()) {
-            const ssize_t count = ::write(fd, contents.data() + written, contents.size() - written);
-            if (count <= 0) {
-                ::close(fd);
-                ::unlink(path_.c_str());
-                throw std::runtime_error("temporary RDB write failed");
-            }
-            written += static_cast<std::size_t>(count);
-        }
-        if (::close(fd) != 0) {
-            ::unlink(path_.c_str());
-            throw std::runtime_error("temporary RDB close failed");
-        }
-    }
-
-    ~TemporaryRdb() { ::unlink(path_.c_str()); }
-    const std::string& path() const { return path_; }
-
-private:
-    TemporaryRdb(const TemporaryRdb&);
-    TemporaryRdb& operator=(const TemporaryRdb&);
-    std::string path_;
+    explicit TemporaryRdb(const std::string& contents)
+        : rdb_test::TemporaryRdb("rdb-parser-test", contents) {}
 };
 
 } // namespace
@@ -72,17 +45,6 @@ int main() {
     }
     RDB_CHECK(index_parse_cancelled);
 
-    // 1차 scan과 comment pread 사이의 동일-size 파일 변경도 감지해야 한다.
-    const TemporaryRdb file_state_fixture("TOP 0.001\n");
-    const int state_fd = ::open(file_state_fixture.path().c_str(), O_RDWR | O_CLOEXEC);
-    RDB_CHECK(state_fd >= 0);
-    const rdb::detail::FileState state_before = rdb::detail::capture_file_state(state_fd);
-    RDB_CHECK(::pwrite(state_fd, "X", 1, 0) == 1);
-    RDB_CHECK(::fsync(state_fd) == 0);
-    const rdb::detail::FileState state_after = rdb::detail::capture_file_state(state_fd);
-    RDB_CHECK(!rdb::detail::same_file_state(state_before, state_after));
-    RDB_CHECK(::close(state_fd) == 0);
-
     const rdb::CheckIndexDatabase index_database =
         index_parser.parse_database(sample_path("standard_sample.rdb"));
     static_assert(
@@ -94,16 +56,6 @@ int main() {
     RDB_CHECK(index_database.top_cell_name == "TOP_CHIP");
     RDB_CHECK(index_database.database_precision == 1000.0);
     RDB_CHECK(index_database.checks.size() == 3);
-
-    // fd 편의 API는 호출자가 사용 중인 file offset을 변경하지 않는다.
-    const int shared_index_fd = ::open(sample_path("standard_sample.rdb").c_str(), O_RDONLY | O_CLOEXEC);
-    RDB_CHECK(shared_index_fd >= 0);
-    RDB_CHECK(::lseek(shared_index_fd, 7, SEEK_SET) == 7);
-    const rdb::CheckIndexDatabase fd_index_database =
-        index_parser.parse_database(shared_index_fd);
-    RDB_CHECK(fd_index_database.checks.size() == index_database.checks.size());
-    RDB_CHECK(::lseek(shared_index_fd, 0, SEEK_CUR) == 7);
-    RDB_CHECK(::close(shared_index_fd) == 0);
 
     RDB_CHECK(index_database.checks[0].name == "M1.SPACING.1");
     RDB_CHECK(index_database.checks[0].comment ==
@@ -146,19 +98,15 @@ int main() {
         if (i != 0) RDB_CHECK(progress_values[i - 1] < progress_values[i]);
     }
 
-    // 90 callback에서 동일-size 변경이 생기면 100을 보내지 않고 거부한다.
+    // 90 callback에서 파일 크기가 바뀌면 100을 보내지 않고 거부한다.
     const TemporaryRdb changing_file(
         "TOP 0.001\nCHANGING.CHECK\n0 0 1 Jul 21 12:10:49 2026\ncomment\n");
-    const int changing_fd = ::open(changing_file.path().c_str(), O_RDWR | O_CLOEXEC);
-    RDB_CHECK(changing_fd >= 0);
     std::vector<int> changing_progress;
     rdb::FastCheckIndexOptions changing_options;
-    changing_options.progress_callback = [&changing_progress, changing_fd](int value) {
+    changing_options.progress_callback = [&changing_progress, &changing_file](int value) {
         changing_progress.push_back(value);
         if (value == 90) {
-            if (::pwrite(changing_fd, "X", 1, 0) != 1 || ::fsync(changing_fd) != 0) {
-                throw std::runtime_error("cannot mutate progress test file");
-            }
+            changing_file.append("X");
         }
     };
     bool changing_file_rejected = false;
@@ -170,7 +118,6 @@ int main() {
     RDB_CHECK(changing_file_rejected);
     RDB_CHECK(!changing_progress.empty());
     RDB_CHECK(changing_progress.back() != 100);
-    RDB_CHECK(::close(changing_fd) == 0);
 
     // Callback 예외는 삼키지 않고 호출자에게 그대로 전달하며 100을 보내지 않는다.
     struct ProgressAbort {};
@@ -192,16 +139,12 @@ int main() {
 
     // 0 callback에서 파일이 크게 늘어나도 진행률 계산은 int 범위를 넘지 않는다.
     const TemporaryRdb growing_file("X");
-    const int growing_fd = ::open(growing_file.path().c_str(), O_RDWR | O_CLOEXEC);
-    RDB_CHECK(growing_fd >= 0);
     std::vector<int> growing_progress;
     rdb::FastCheckIndexOptions growing_options;
-    growing_options.progress_callback = [&growing_progress, growing_fd](int value) {
+    growing_options.progress_callback = [&growing_progress, &growing_file](int value) {
         growing_progress.push_back(value);
-        if (value == 0 &&
-            (::pwrite(growing_fd, "T 1\n", 4, 0) != 4 ||
-             ::ftruncate(growing_fd, 24 * 1024 * 1024) != 0)) {
-            throw std::runtime_error("cannot grow progress test file");
+        if (value == 0) {
+            growing_file.append(std::string(24U * 1024U * 1024U, ' '));
         }
     };
     bool growing_file_rejected = false;
@@ -217,7 +160,6 @@ int main() {
         RDB_CHECK(growing_progress[i] >= 0);
         RDB_CHECK(growing_progress[i] <= 100);
     }
-    RDB_CHECK(::close(growing_fd) == 0);
 
     rdb::FastCheckIndexOptions small_index_options;
     small_index_options.read_buffer_bytes = 71;
@@ -372,6 +314,8 @@ int main() {
     RDB_CHECK(first_check.results.size() == 2);
     RDB_CHECK(first_check.results[0].vertices.size() == 4);
     RDB_CHECK(first_check.results[0].properties.size() == 5);
+    RDB_CHECK(first_check.results[0].properties[4].id == "CN");
+    RDB_CHECK(first_check.results[0].properties[4].payload == "INV_X1");
     RDB_CHECK(first_check.results[1].edges.size() == 2);
 
     const rdb::CheckDetailFile detail_file(sample_path("standard_sample.rdb"));
@@ -379,6 +323,21 @@ int main() {
     RDB_CHECK(second_check.name == "M2.DENSITY.MIN");
     RDB_CHECK(second_check.results.size() == 1);
     RDB_CHECK(second_check.results[0].vertices.size() == 4);
+
+    std::size_t session_batch_result_count = 0U;
+    rdb::CheckDetailBatchOptions session_batch_options;
+    session_batch_options.batch_size = 1U;
+    session_batch_options.batch_callback =
+        [&session_batch_result_count](
+            const std::vector<rdb::DetailResult>& batch) {
+            session_batch_result_count += batch.size();
+        };
+    const rdb::CheckDetailBatchResult session_batch =
+        detail_file.parse_at_batches(
+            index[0].offset, session_batch_options);
+    RDB_CHECK(session_batch.completed);
+    RDB_CHECK(session_batch.parsed_result_count == 2U);
+    RDB_CHECK(session_batch_result_count == 2U);
 
     const rdb::CheckDetail extended_check = detail_parser.parse_file_at(
         sample_path("post_coordinate_tags_sample.rdb"),
@@ -389,6 +348,7 @@ int main() {
     RDB_CHECK(extended_check.results[1].properties.size() == 3);
     RDB_CHECK(extended_check.results[1].properties[0].id == "EL");
     RDB_CHECK(extended_check.results[1].properties[2].id == "CN");
+    RDB_CHECK(extended_check.results[1].properties[2].payload == "INV_X1");
 
     // 좌표 앞뒤에 있던 property는 파일에서 발견한 순서대로 하나의 vector에 보관한다.
     const TemporaryRdb mixed_property_file(
@@ -447,7 +407,7 @@ int main() {
     RDB_CHECK(batch_sizes[1] == 10000U);
     RDB_CHECK(batch_sizes[2] == 1U);
 
-    // 선택 변경 시 cancellation callback이 true가 되면 기존 파싱은 다음 결과 전에 중단한다.
+    // 파일 재로딩/종료 시 cancellation callback이 true가 되면 다음 결과 전에 중단한다.
     bool cancel_requested = false;
     std::size_t delivered_before_cancel = 0;
     rdb::CheckDetailBatchOptions cancel_options;

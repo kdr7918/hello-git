@@ -6,3 +6,4 @@
 *.user
 __pycache__/
 *.py[cod]
+stress_detail_sample.rdb

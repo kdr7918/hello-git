@@ -11,7 +11,7 @@
 namespace rdb {
 
 // Index와 선택 detail을 모두 canonical rdb::Database에 기록한다.
-// 이 클래스는 같은 open-file snapshot의 mmap 수명과 변경 검증만 소유한다.
+// 표준 C++로 읽은 동일 파일 byte snapshot을 복사본끼리 공유한다.
 class IndexedRdbFile {
 public:
     explicit IndexedRdbFile(
@@ -38,10 +38,8 @@ public:
 private:
     void verify_file_unchanged();
 
-    // Copies share the same open inode/mmap lifetime while Database state is deep-copied.
-    // The backing inode must not be modified in place while any copy may parse it.
-    std::shared_ptr<detail::MappedFile> file_;
-    detail::FileState file_state_;
+    // Copies share immutable file bytes while Database state is deep-copied.
+    std::shared_ptr<detail::FileBuffer> file_;
     Database database_;
     // Property tag interning is parser-session state, not canonical Database data.
     std::vector<StringId> tag_names_;

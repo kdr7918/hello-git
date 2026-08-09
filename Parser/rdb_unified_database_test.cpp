@@ -1,14 +1,14 @@
 #include "rdb_indexed_file.hpp"
+#include "test_temporary_rdb.hpp"
 
-#include <cstdio>
 #include <cstdlib>
-#include <fcntl.h>
+#include <fstream>
 #include <future>
 #include <iostream>
+#include <iterator>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
-#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -27,36 +27,25 @@ std::string text(const rdb::Database& database, rdb::StringId id) {
     return database.strings.get(id).str();
 }
 
-class TemporaryRdb {
-public:
-    explicit TemporaryRdb(const std::string& contents) {
-        char pattern[] = "/tmp/rdb-unified-test-XXXXXX";
-        const int fd = ::mkstemp(pattern);
-        if (fd < 0) throw std::runtime_error("mkstemp failed");
-        path_ = pattern;
-        std::size_t written = 0;
-        while (written < contents.size()) {
-            const ssize_t count = ::write(fd, contents.data() + written, contents.size() - written);
-            if (count <= 0) {
-                ::close(fd);
-                ::unlink(path_.c_str());
-                throw std::runtime_error("temporary RDB write failed");
-            }
-            written += static_cast<std::size_t>(count);
-        }
-        if (::close(fd) != 0) {
-            ::unlink(path_.c_str());
-            throw std::runtime_error("temporary RDB close failed");
-        }
+rdb::CheckOffset file_offset_of(
+    const std::string& path,
+    const std::string& needle) {
+    std::ifstream input(path.c_str(), std::ios::binary);
+    if (!input) throw std::runtime_error("cannot read test RDB file");
+    const std::string contents(
+        (std::istreambuf_iterator<char>(input)),
+        std::istreambuf_iterator<char>());
+    const std::string::size_type offset = contents.find(needle);
+    if (offset == std::string::npos) {
+        throw std::runtime_error("test text not found in RDB file");
     }
+    return static_cast<rdb::CheckOffset>(offset);
+}
 
-    ~TemporaryRdb() { ::unlink(path_.c_str()); }
-    const std::string& path() const { return path_; }
-
-private:
-    TemporaryRdb(const TemporaryRdb&);
-    TemporaryRdb& operator=(const TemporaryRdb&);
-    std::string path_;
+class TemporaryRdb : public rdb_test::TemporaryRdb {
+public:
+    explicit TemporaryRdb(const std::string& contents)
+        : rdb_test::TemporaryRdb("rdb-unified-test", contents) {}
 };
 
 } // namespace
@@ -142,7 +131,7 @@ int main() {
 
     const rdb::RuleCheck& indexed = database.check(0U);
     RDB_CHECK(text(database, indexed.name) == "M1.SPACING.1");
-    RDB_CHECK(indexed.offset == 14U);
+    RDB_CHECK(indexed.offset == file_offset_of(path, "M1.SPACING.1"));
     RDB_CHECK(indexed.current_result_count == 2U);
     RDB_CHECK(indexed.original_result_count == 2U);
     RDB_CHECK(indexed.declared_check_text_count == 3U);
@@ -236,7 +225,7 @@ int main() {
     RDB_CHECK(text(assigned.database(), assigned.database().top_cell_name) == "TOP_CHIP");
     RDB_CHECK(assigned.database().loaded_check_count() == 2U);
 
-    const TemporaryRdb copied_snapshot_source(
+    TemporaryRdb copied_snapshot_source(
         "COPY_SNAPSHOT 1000\nCOPY.ONE\n0 0 0 Jul 21 10:35:00 2026\n"
         "COPY.TWO\n1 1 0 Jul 21 10:36:00 2026\np 1 1\n11 12\n");
     const TemporaryRdb copied_snapshot_initial("COPY_OLD 1000\n");
@@ -245,13 +234,15 @@ int main() {
         rdb::IndexedRdbFile snapshot_source(copied_snapshot_source.path());
         copied_snapshot = snapshot_source;
     }
-    RDB_CHECK(::unlink(copied_snapshot_source.path().c_str()) == 0);
-    copied_snapshot.load_check(1U);
-    const rdb::RuleCheck& copied_snapshot_check = copied_snapshot.database().check(1U);
-    const rdb::Result& copied_snapshot_result =
-        copied_snapshot.database().results[copied_snapshot_check.results.begin];
-    RDB_CHECK(copied_snapshot.database().vertices[copied_snapshot_result.geometry.begin].x == 11);
-    RDB_CHECK(copied_snapshot.database().vertices[copied_snapshot_result.geometry.begin].y == 12);
+    RDB_CHECK(copied_snapshot_source.remove_file());
+    bool removed_source_rejected = false;
+    try {
+        (void)copied_snapshot.load_check(1U);
+    } catch (const rdb::ScanError&) {
+        removed_source_rejected = true;
+    }
+    RDB_CHECK(removed_source_rejected);
+    RDB_CHECK(!copied_snapshot.database().check(1U).detail_loaded);
 
     // Intended workflow: parse every Check on a worker thread, then replace the
     // foreground object with an O(1) move assignment after synchronization.
@@ -392,12 +383,12 @@ int main() {
     RDB_CHECK(text(duplicates_file.database(), second_property.id) == "SHARED");
     RDB_CHECK(text(duplicates_file.database(), second_property.payload) == "second-value");
 
-    const TemporaryRdb snapshot_file(
+    TemporaryRdb snapshot_file(
         "TOP 1000\nSNAPSHOT.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n7 8\n");
     rdb::IndexedRdbFile snapshot(snapshot_file.path());
-    const TemporaryRdb replacement_file(
-        "TOP 1000\nREPLACEMENT.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n9 9\n");
-    RDB_CHECK(::rename(replacement_file.path().c_str(), snapshot_file.path().c_str()) == 0);
+    TemporaryRdb replacement_file(
+        "TOP 1000\nREPLACED.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n9 9\n");
+    RDB_CHECK(replacement_file.replace(snapshot_file));
     snapshot.load_check(0U);
     const rdb::RuleCheck& snapshot_check = snapshot.database().check(0U);
     const rdb::Result& snapshot_result =
@@ -409,20 +400,15 @@ int main() {
     const TemporaryRdb modified_file(
         "TOP 1000\nMODIFIED.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n1 2\n");
     rdb::IndexedRdbFile modified(modified_file.path());
-    const int modified_fd = ::open(modified_file.path().c_str(), O_RDWR | O_CLOEXEC);
-    RDB_CHECK(modified_fd >= 0);
-    RDB_CHECK(::pwrite(modified_fd, "X", 1, 0) == 1);
-    RDB_CHECK(::fsync(modified_fd) == 0);
-    RDB_CHECK(::close(modified_fd) == 0);
-    bool modification_rejected = false;
-    try {
-        (void)modified.load_check(0U);
-    } catch (const rdb::ScanError&) {
-        modification_rejected = true;
-    }
-    RDB_CHECK(modification_rejected);
-    RDB_CHECK(!modified.database().check(0U).detail_loaded);
-    RDB_CHECK(modified.database().loaded_check_count() == 0U);
+    modified_file.overwrite(
+        "XOP 1000\nMODIFIED.CHECK\n1 1 0 Jul 21 10:35:00 2026\np 1 1\n9 9\n");
+    (void)modified.load_check(0U);
+    const rdb::RuleCheck& modified_check = modified.database().check(0U);
+    const rdb::Result& modified_result =
+        modified.database().results[modified_check.results.begin];
+    RDB_CHECK(modified_check.detail_loaded);
+    RDB_CHECK(modified.database().vertices[modified_result.geometry.begin].x == 1);
+    RDB_CHECK(modified.database().vertices[modified_result.geometry.begin].y == 2);
 
     std::cout << "rdb-unified-database-test: OK\n";
 }

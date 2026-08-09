@@ -1,9 +1,19 @@
-execute_process(
-    COMMAND "${EXAMPLE}" "${RDB_FILE}" "MISSING.CHECK"
-    RESULT_VARIABLE result
-    OUTPUT_VARIABLE output
-    ERROR_VARIABLE error
-)
+if(RUNTIME_DIR)
+    execute_process(
+        COMMAND "${CMAKE_COMMAND}" -E env "PATH=${RUNTIME_DIR};$ENV{PATH}"
+                "${EXAMPLE}" "${RDB_FILE}" "MISSING.CHECK"
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE output
+        ERROR_VARIABLE error
+    )
+else()
+    execute_process(
+        COMMAND "${EXAMPLE}" "${RDB_FILE}" "MISSING.CHECK"
+        RESULT_VARIABLE result
+        OUTPUT_VARIABLE output
+        ERROR_VARIABLE error
+    )
+endif()
 
 if(NOT result EQUAL 3)
     message(FATAL_ERROR
