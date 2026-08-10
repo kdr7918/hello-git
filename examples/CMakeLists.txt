@@ -13,7 +13,7 @@ if(BUILD_TESTING)
     )
     set_tests_properties(rdb-database-example-smoke PROPERTIES
         PASS_REGULAR_EXPRESSION
-            "Traversed values: properties=5, vertices=4, edges=2"
+            "Traversed values: properties=6, vertices=4, edges=2"
     )
 
     rdb_add_test(
@@ -24,7 +24,7 @@ if(BUILD_TESTING)
     )
     set_tests_properties(rdb-database-example-tagged-keys PROPERTIES
         PASS_REGULAR_EXPRESSION
-            "Tagged keys: PP PA EL EW CN"
+            "Tagged keys: PP PA EL EW CN CN"
     )
 
     if(MINGW)

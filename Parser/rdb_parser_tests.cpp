@@ -24,6 +24,16 @@ std::string sample_path(const char* name) {
     return std::string(RDB_SAMPLE_DIR) + "/" + name;
 }
 
+// DetailResult의 CN payload를 반환하고 없으면 빈 문자열을 반환한다.
+std::string cell_name_of(const rdb::DetailResult& result) {
+    for (std::size_t i = 0; i < result.properties.size(); ++i) {
+        if (result.properties[i].id == "CN") {
+            return result.properties[i].payload;
+        }
+    }
+    return std::string();
+}
+
 class TemporaryRdb : public rdb_test::TemporaryRdb {
 public:
     explicit TemporaryRdb(const std::string& contents)
@@ -317,6 +327,8 @@ int main() {
     RDB_CHECK(first_check.results[0].properties[4].id == "CN");
     RDB_CHECK(first_check.results[0].properties[4].payload == "INV_X1");
     RDB_CHECK(first_check.results[1].edges.size() == 2);
+    RDB_CHECK(first_check.results[1].properties.size() == 1U);
+    RDB_CHECK(cell_name_of(first_check.results[1]) == "INV_X1");
 
     const rdb::CheckDetailFile detail_file(sample_path("standard_sample.rdb"));
     const rdb::CheckDetail second_check = detail_file.parse_at(index[1].offset);
@@ -325,12 +337,16 @@ int main() {
     RDB_CHECK(second_check.results[0].vertices.size() == 4);
 
     std::size_t session_batch_result_count = 0U;
+    std::vector<std::string> session_batch_cell_names;
     rdb::CheckDetailBatchOptions session_batch_options;
     session_batch_options.batch_size = 1U;
     session_batch_options.batch_callback =
-        [&session_batch_result_count](
+        [&session_batch_result_count, &session_batch_cell_names](
             const std::vector<rdb::DetailResult>& batch) {
             session_batch_result_count += batch.size();
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                session_batch_cell_names.push_back(cell_name_of(batch[i]));
+            }
         };
     const rdb::CheckDetailBatchResult session_batch =
         detail_file.parse_at_batches(
@@ -338,6 +354,52 @@ int main() {
     RDB_CHECK(session_batch.completed);
     RDB_CHECK(session_batch.parsed_result_count == 2U);
     RDB_CHECK(session_batch_result_count == 2U);
+    RDB_CHECK(session_batch_cell_names.size() == 2U);
+    RDB_CHECK(session_batch_cell_names[0] == "INV_X1");
+    RDB_CHECK(session_batch_cell_names[1] == "INV_X1");
+
+    // 명시적 CN이 다시 나오면 이후 생략 Result는 새 Cell Name을 상속한다.
+    const TemporaryRdb inherited_cell_name_file(
+        "TOP 1000\nCN.INHERITANCE\n4 4 0 Jul 21 10:35:00 2026\n"
+        "CN CELL_A\np 1 1\n0 0\n"
+        "p 2 1\n1 1\n"
+        "p 3 1\nCN CELL_B\n2 2\n"
+        "p 4 1\n3 3\n");
+    const rdb::CheckOffset inherited_cell_name_offset =
+        index_parser.parse_file(inherited_cell_name_file.path())[0].offset;
+    const rdb::CheckDetail inherited_cell_names =
+        detail_parser.parse_file_at(
+            inherited_cell_name_file.path(), inherited_cell_name_offset);
+    RDB_CHECK(inherited_cell_names.results.size() == 4U);
+    RDB_CHECK(cell_name_of(inherited_cell_names.results[0]) == "CELL_A");
+    RDB_CHECK(cell_name_of(inherited_cell_names.results[1]) == "CELL_A");
+    RDB_CHECK(cell_name_of(inherited_cell_names.results[2]) == "CELL_B");
+    RDB_CHECK(cell_name_of(inherited_cell_names.results[3]) == "CELL_B");
+    for (std::size_t i = 0; i < inherited_cell_names.results.size(); ++i) {
+        RDB_CHECK(inherited_cell_names.results[i].properties.size() == 1U);
+    }
+
+    std::vector<std::string> inherited_batch_cell_names;
+    rdb::CheckDetailBatchOptions inherited_batch_options;
+    inherited_batch_options.batch_size = 1U;
+    inherited_batch_options.batch_callback =
+        [&inherited_batch_cell_names](
+            const std::vector<rdb::DetailResult>& batch) {
+            for (std::size_t i = 0; i < batch.size(); ++i) {
+                inherited_batch_cell_names.push_back(cell_name_of(batch[i]));
+            }
+        };
+    const rdb::CheckDetailBatchResult inherited_batch =
+        detail_parser.parse_file_at_batches(
+            inherited_cell_name_file.path(),
+            inherited_cell_name_offset,
+            inherited_batch_options);
+    RDB_CHECK(inherited_batch.completed);
+    RDB_CHECK(inherited_batch_cell_names.size() == 4U);
+    RDB_CHECK(inherited_batch_cell_names[0] == "CELL_A");
+    RDB_CHECK(inherited_batch_cell_names[1] == "CELL_A");
+    RDB_CHECK(inherited_batch_cell_names[2] == "CELL_B");
+    RDB_CHECK(inherited_batch_cell_names[3] == "CELL_B");
 
     const rdb::CheckDetail extended_check = detail_parser.parse_file_at(
         sample_path("post_coordinate_tags_sample.rdb"),

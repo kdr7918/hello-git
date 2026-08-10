@@ -23,6 +23,7 @@ struct DetailResult {
     std::uint32_t ordinal;
     std::string signature_suffix;
     // 좌표 앞뒤 위치를 구분하지 않고 파일에서 발견한 순서대로 보관한다.
+    // CN이 생략된 Result에는 Check 안에서 직전에 확인한 CN이 추가된다.
     std::vector<DetailTag> properties;
     std::vector<Point> vertices;
     std::vector<Edge> edges;
@@ -88,6 +89,28 @@ inline DetailTag parse_detail_tag(Span text) {
     }
     tag.payload.assign(payload.begin, payload.size());
     return tag;
+}
+
+// property가 Cell Name 상태를 갱신하는 CN 태그인지 검사한다.
+inline bool is_cell_name_tag(const DetailTag& tag) {
+    return tag.id.size() == 2U && tag.id[0] == 'C' && tag.id[1] == 'N';
+}
+
+// 명시적 CN은 Check 상태를 갱신하고, 생략된 Result에는 직전 CN을 상속한다.
+inline void apply_cell_name_context(
+    DetailResult& result,
+    DetailTag& current_cell_name,
+    bool& has_current_cell_name) {
+    bool has_explicit_cell_name = false;
+    for (std::size_t i = 0; i < result.properties.size(); ++i) {
+        if (!is_cell_name_tag(result.properties[i])) continue;
+        current_cell_name = result.properties[i];
+        has_current_cell_name = true;
+        has_explicit_cell_name = true;
+    }
+    if (!has_explicit_cell_name && has_current_cell_name) {
+        result.properties.push_back(current_cell_name);
+    }
 }
 
 inline void consume_detail_geometry(LineCursor& cursor,
@@ -226,6 +249,8 @@ inline CheckDetail parse_check_detail(const FileBuffer& file, CheckOffset offset
         return check;
     }
 
+    DetailTag current_cell_name;
+    bool has_current_cell_name = false;
     for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
         DetailResult result;
         Line signature_line;
@@ -258,6 +283,8 @@ inline CheckDetail parse_check_detail(const FileBuffer& file, CheckOffset offset
         } else {
             consume_detail_intermediate_tail(cursor, result);
         }
+        apply_cell_name_context(
+            result, current_cell_name, has_current_cell_name);
         // DetailResult 안의 큰 vector들을 복사하지 않고 CheckDetail로 소유권을 옮긴다.
         check.results.push_back(std::move(result));
     }
@@ -409,6 +436,8 @@ inline CheckDetailBatchResult parse_check_detail_batches(
 
     std::vector<DetailResult> batch;
     batch.reserve(options.batch_size);
+    DetailTag current_cell_name;
+    bool has_current_cell_name = false;
     for (std::uint32_t i = 0; i < header.current_result_count; ++i) {
         if (detail_parse_cancelled(options.is_cancelled)) return outcome;
         DetailResult result;
@@ -441,6 +470,9 @@ inline CheckDetailBatchResult parse_check_detail_batches(
             : consume_detail_intermediate_tail_cancellable(cursor, result, options.is_cancelled);
         if (!tail_complete) return outcome;
 
+        // batch.clear()와 무관하게 Check 단위 CN 상태는 다음 Result까지 유지한다.
+        apply_cell_name_context(
+            result, current_cell_name, has_current_cell_name);
         batch.push_back(std::move(result));
         ++outcome.parsed_result_count;
         if (batch.size() == options.batch_size) {

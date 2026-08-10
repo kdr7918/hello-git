@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<ui version="4.0">
+ <class>CalibreTextDock</class>
+ <widget class="QDockWidget" name="CalibreTextDock">
+  <property name="windowTitle">
+   <string>RDB Viewer</string>
+  </property>
+  <widget class="QWidget" name="dockWidgetContents">
+   <layout class="QVBoxLayout" name="dock_layout">
+    <property name="leftMargin"><number>4</number></property>
+    <property name="topMargin"><number>4</number></property>
+    <property name="rightMargin"><number>4</number></property>
+    <property name="bottomMargin"><number>4</number></property>
+    <item>
+     <widget class="QSplitter" name="splitter">
+      <property name="orientation"><enum>Qt::Horizontal</enum></property>
+      <widget class="QWidget" name="navigation_widget">
+       <layout class="QVBoxLayout" name="navigation_layout">
+        <property name="leftMargin"><number>0</number></property>
+        <property name="topMargin"><number>0</number></property>
+        <property name="rightMargin"><number>0</number></property>
+        <property name="bottomMargin"><number>0</number></property>
+        <item>
+         <widget class="QTableView" name="chip_name_table_view"/>
+        </item>
+        <item>
+         <widget class="QTreeView" name="rdb_tree_view"/>
+        </item>
+        <item>
+         <layout class="QHBoxLayout" name="search_layout">
+          <item>
+           <widget class="QLineEdit" name="search_edit">
+            <property name="placeholderText"><string>Search tree...</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="prev_btn">
+            <property name="text"><string>&lt;</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QPushButton" name="next_btn">
+            <property name="text"><string>&gt;</string></property>
+           </widget>
+          </item>
+          <item>
+           <widget class="QLabel" name="search_index_label">
+            <property name="text"><string>0 / 0</string></property>
+           </widget>
+          </item>
+         </layout>
+        </item>
+       </layout>
+      </widget>
+      <widget class="QTableView" name="coordinate_table_view"/>
+     </widget>
+    </item>
+   </layout>
+  </widget>
+ </widget>
+ <resources/>
+ <connections/>
+</ui>
