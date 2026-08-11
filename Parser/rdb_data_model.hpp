@@ -1,5 +1,5 @@
-#ifndef ASCII_RDB_HPP
-#define ASCII_RDB_HPP
+#ifndef RDB_DATA_MODEL_HPP
+#define RDB_DATA_MODEL_HPP
 
 #include <cmath>
 #include <cstddef>
@@ -348,4 +348,4 @@ struct Database {
 
 } // namespace rdb
 
-#endif // ASCII_RDB_HPP
+#endif // RDB_DATA_MODEL_HPP

@@ -146,7 +146,7 @@ pool 크기를 출력한다. 잘못된 인자와 찾을 수 없는 Check는 별�
 
 ## 구성
 
-- `Parser/ascii_rdb.hpp` — canonical Database와 flat record/pool 모델
+- `Parser/rdb_data_model.hpp` — canonical Database와 flat record/pool 모델
 - `Parser/rdb_check_index.hpp` — 빠른 Check index scanner
 - `Parser/rdb_check_detail.hpp` — 선택 Check detail parser
 - `Parser/rdb_indexed_file.*` — snapshot 관리와 index/detail → 같은 Database 통합

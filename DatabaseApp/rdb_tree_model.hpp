@@ -1,7 +1,7 @@
 #ifndef DATABASE_APP_RDB_TREE_MODEL_HPP
 #define DATABASE_APP_RDB_TREE_MODEL_HPP
 
-#include "rdb_database.hpp"
+#include "rdb_database_support.hpp"
 
 #include <QAbstractItemModel>
 #include <QMap>

@@ -1,7 +1,7 @@
 #ifndef RDB_CHECK_INDEX_HPP
 #define RDB_CHECK_INDEX_HPP
 
-#include "ascii_rdb.hpp"
+#include "rdb_data_model.hpp"
 
 #include <cmath>
 #include <cstddef>

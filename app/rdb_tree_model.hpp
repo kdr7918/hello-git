@@ -1,7 +1,7 @@
 #ifndef RDB_TREE_MODEL_HPP
 #define RDB_TREE_MODEL_HPP
 
-#include "ascii_rdb.hpp"
+#include "rdb_data_model.hpp"
 
 #include <QAbstractItemModel>
 #include <QStringList>

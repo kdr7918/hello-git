@@ -13,8 +13,8 @@ set(DATABASE_APP_SOURCES
     calibre_text_dock.cpp
     calibre_text_dock.hpp
     calibre_text_dock.ui
-    rdb_database.cpp
-    rdb_database.hpp
+    rdb_database_support.cpp
+    rdb_database_support.hpp
     rdb_model.cpp
     rdb_model.hpp
     rdb_parser_workers.cpp
@@ -43,8 +43,8 @@ include(CTest)
 if(BUILD_TESTING)
     add_executable(database-app-model-test
         database_app_model_test.cpp
-        rdb_database.cpp
-        rdb_database.hpp
+        rdb_database_support.cpp
+        rdb_database_support.hpp
         rdb_model.cpp
         rdb_model.hpp
         rdb_tree_model.cpp
@@ -83,8 +83,8 @@ if(BUILD_TESTING)
 
     add_executable(database-app-worker-test
         database_app_worker_test.cpp
-        rdb_database.cpp
-        rdb_database.hpp
+        rdb_database_support.cpp
+        rdb_database_support.hpp
         rdb_model.cpp
         rdb_model.hpp
         rdb_parser_workers.cpp
