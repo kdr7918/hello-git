@@ -98,7 +98,9 @@ net_name = VDD
 - 조회 결과는 복사본이므로 변경해도 저장소는 바뀌지 않습니다.
 - 이전 compact 버전과 달리 문자열·vector를 영구 보관합니다. 이름 공유도 없으며,
   메모리 사용량은 증가할 수 있습니다. **단순함 우선 버전이며 성능은 미측정입니다.**
-- 실제 Multigon 코드 변경, SDK/Writer 연결, 파일 roundtrip은 하지 않았습니다.
+- 실제 Multigon 코드 변경과 SDK/Writer 통합은 하지 않았습니다.
+  Creator 추가 함수의 소규모 File/Cell/Element 파일 roundtrip은 통과했습니다.
+  검증 범위와 호출 예시는 [CREATOR.md](CREATOR.md)를 참고하세요.
 - 이름 레코드 자체의 Property, 생략된 TEXT/X/NODE 속성, 편집/삭제는 미구현입니다.
 - Multigon 원본 소스는 포함하지 않습니다. 이전 인코딩 버전은 Git 이력에 있습니다.
 

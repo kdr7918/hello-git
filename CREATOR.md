@@ -1,69 +1,102 @@
-# 저장된 Property를 Creator로 출력
+# File / Cell / Shape Property를 Creator로 출력
 
 추가할 파일은 [`property-creator.h`](property-creator.h) 하나입니다.
-기존 PropertyStore는 변경하지 않습니다. Multigon의 Creator/이름 타입 헤더가 필요합니다.
+저장 구조는 그대로이며, 출력할 때만 Oasis::Property로 변환합니다.
 
-## 변환 흐름
+## 대상별 함수
 
-```text
-store.getShape(shape.base())
-    -> PropertyList
-    -> 출력할 때만 Oasis::Property로 변환
-    -> creator.addElementProperty()
+```cpp
+// 파일: beginFile() 직후, 첫 Cell 전에
+writeFileProperties(creator, store.getFile(), names);
+
+// Cell: beginCell() 직후, 첫 도형 전에
+writeCellProperties(creator, store.getCell(cellId), names);
+
+// Shape/Placement: 해당 begin...() 직후
+writeElementProperties(creator, store.getShape(shape.base()), names);
 ```
 
-## 붙여넣을 사용 예시
+세 함수는 `layout_property` namespace 안에 있습니다.
+변환 코드는 공통으로 사용하고 마지막 Creator 호출만 다릅니다.
 
-아래는 이미 Creator로 파일/Cell/도형을 쓰는 코드에 넣는 조각입니다.
-`creator`, `store`, `shape` 및 좌표 변수는 기존 출력 코드의 객체를 사용합니다.
+## 목록을 저장하는 방법
+
+```cpp
+using namespace layout_property;
+
+Property fileProperty;
+fileProperty.name = "author";
+fileProperty.addText("Kim");
+store.saveFile(PropertyList{fileProperty});
+
+Property cellProperty;
+cellProperty.name = "cell_note";
+cellProperty.addText("TOP cell");
+store.saveCell(cellId, PropertyList{cellProperty});
+
+// Shape도 store.saveShape(shape.base(), list)로 저장
+store.finish(); // 모든 file/cell/shape 저장 완료 후 한 번
+```
+
+## 출력 순서 — 기존 출력 코드에 삽입
+
+`creator`, `store`, `cellName`, `cellId`, `shape` 및 좌표 변수는 기존 객체입니다.
+아래는 독립 프로그램이 아닌 붙여넣기 조각입니다.
 
 ```cpp
 #include "property-creator.h"
+using namespace layout_property;
 
-// 파일 출력 전체 동안 유지. 루프 안에서 만들지 마세요.
-layout_property::OutputNames names;
+OutputNames names; // 파일 전체 동안 유지. Cell/Shape 루프 밖에 둡니다.
 
-// 기존 creator.beginFile(...);
-// 기존 creator.beginCell(...);
+creator.beginFile("1.0", unit, validationScheme);
+writeFileProperties(creator, store.getFile(), names);
 
-// 기존 도형 출력
-creator.beginRectangle(
-    layer, datatype, x, y, width, height, nullptr);
+creator.beginCell(cellName);
+writeCellProperties(creator, store.getCell(cellId), names);
 
-// 방금 출력한 도형의 Property를 바로 뒤에 출력
-layout_property::writeElementProperties(
-    creator,
-    store.getShape(shape.base()),
-    names);
-
+creator.beginRectangle(layer, datatype, x, y, width, height, nullptr);
+writeElementProperties(creator, store.getShape(shape.base()), names);
 creator.endElement();
 
-// 다른 도형도 begin...() 직후 같은 함수를 호출합니다.
-// 모두 같은 names를 사용합니다.
+// 다른 도형도 begin...() 직후 Property 출력
 creator.endCell();
+
+// 다른 Cell도 beginCell() 직후 Property 출력
 creator.endFile();
-// 이 시점 이후 names 파괴 가능
+// 이제 names를 파괴해도 됩니다.
 ```
 
-## 보존하는 것
+## 수명과 보존 범위
 
-- 입력 이름과 standard flag
-- Property 순서와 중복 이름
-- 값의 순서, signed/unsigned, 문자열 종류와 binary NUL
-- 유리수 분자/분모 및 Float/Double 구분
-
-이름은 출력 수명 동안 names가 소유합니다. 임시 Oasis::Property 자체는 각 호출 후
-파괴할 수 있습니다. Creator가 파일 인코딩/재사용 표현을 처리합니다.
+- 이름 객체는 names가 소유하며 creator.endFile() 반환까지 유지합니다.
+- 임시 Oasis::Property는 각 출력 호출 후 파괴할 수 있습니다.
+- 이름·standard flag·Property/값 순서·중복 이름·타입을 변환합니다.
+- OASIS 파일 인코딩과 modal 재사용 표현은 기존 Creator가 처리합니다.
 
 ## 제한
 
-- 이 함수는 **OASIS 이름 기반 Element Property**용입니다.
-- GDS 속성은 명시적으로 거부합니다. S_GDS_PROPERTY 변환은 포함하지 않았습니다.
+- OASIS 이름 기반 File/Cell/Element용입니다. CELLNAME 레코드 자체의 속성과
+  CELL 속성은 다릅니다. 이 함수는 CELLNAME Property를 출력하지 않습니다.
+- GDS 속성은 명시적으로 거부합니다. S_GDS_PROPERTY 변환은 포함하지 않습니다.
+- standard 속성은 이름/값/출력 위치가 표준 규칙에 맞아야 합니다.
 - 유리수는 현재 Creator의 Oreal이 표현할 수 있는 long 범위를 검사합니다.
-- source.standard가 true이면 해당 이름/값/출력 위치가 표준 규칙에 맞아야 합니다.
 - Repetition은 base를 꺼내기 전 wrapper 주소로 Property를 조회합니다.
-- 변환/출력 중 예외가 나면 파일 출력 전체를 실패로 처리하세요. 이전 출력의 롤백은 없습니다.
+- 출력 중 예외가 나면 파일 전체를 실패로 처리하세요. 이전 출력의 롤백은 없습니다.
 - 원본 파일의 refnum·modal 표현·바이트 배열까지 재현하는 것이 아닙니다.
 
-실제 Multigon 헤더로 C++11 문법 검사를 수행한 예제입니다.
-파일을 실제로 쓰고 다시 읽는 roundtrip 검증은 아직 하지 않았습니다.
+## 실제 검증
+
+실제 Multigon의 liboasis/libmisc에 링크한 strict C++11 테스트로:
+1. store에 File/Cell/Shape 속성을 각각 저장
+2. 세 출력 함수로 OASIS 파일 생성
+3. OasisParser로 재입력
+4. 각각 올바른 File/Cell/Element 콜백으로 전달되는지 확인
+5. 이름·정수값·binary NUL 문자열 확인
+
+```text
+PASS: File/Cell/Element Creator roundtrip; names, integer, binary NUL, scopes
+```
+
+이 검증은 위 소규모 fixture 범위입니다. 모든 타입/표준 속성/실파일 corpus 및
+Multigon SDK 전체 경로를 검증했다는 뜻은 아닙니다. Multigon 원본은 수정하지 않았습니다.

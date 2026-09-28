@@ -13,11 +13,14 @@ namespace layout_property {
 // creator.endFile()이 반환할 때까지 보관하세요.
 using OutputNames = std::vector<std::unique_ptr<Oasis::PropName>>;
 
-// 도형 begin...() 직후 호출합니다. 입력 순서와 값 타입을 유지합니다.
+enum class PropertyScope { File, Cell, Element };
+
+// 공통 변환. 아래 writeFile/Cell/ElementProperties에서 호출합니다.
 // 이름 객체만 OutputNames에 남고, 임시 Oasis::Property는 호출 후 파괴됩니다.
-inline void writeElementProperties(Oasis::OasisCreator& creator,
-                                   const PropertyList& input,
-                                   OutputNames& names)
+inline void writeProperties(Oasis::OasisCreator& creator,
+                            const PropertyList& input,
+                            OutputNames& names,
+                            PropertyScope scope)
 {
     using Value = PropertyValue;
     for (const auto& source : input) {
@@ -66,8 +69,34 @@ inline void writeElementProperties(Oasis::OasisCreator& creator,
                 throw std::invalid_argument("알 수 없는 값 타입");
             }
         }
-        creator.addElementProperty(&target);
+        switch (scope) {
+        case PropertyScope::File: creator.addFileProperty(&target); break;
+        case PropertyScope::Cell: creator.addCellProperty(&target); break;
+        case PropertyScope::Element: creator.addElementProperty(&target); break;
+        default: throw std::invalid_argument("알 수 없는 Property 저장 대상");
+        }
     }
+}
+
+// beginFile() 직후, 첫 Cell 전에 호출합니다.
+inline void writeFileProperties(Oasis::OasisCreator& creator,
+                                const PropertyList& input, OutputNames& names)
+{
+    writeProperties(creator, input, names, PropertyScope::File);
+}
+
+// beginCell() 직후, 첫 도형 전에 호출합니다.
+inline void writeCellProperties(Oasis::OasisCreator& creator,
+                                const PropertyList& input, OutputNames& names)
+{
+    writeProperties(creator, input, names, PropertyScope::Cell);
+}
+
+// beginRectangle()/beginPlacement() 등 해당 요소 시작 직후 호출합니다.
+inline void writeElementProperties(Oasis::OasisCreator& creator,
+                                   const PropertyList& input, OutputNames& names)
+{
+    writeProperties(creator, input, names, PropertyScope::Element);
 }
 
 } // namespace layout_property
