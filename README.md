@@ -1,78 +1,106 @@
-# Property 추가 코드
+# 쉬운 Property 예제
 
-Multigon에 **복사·붙여넣기할 Property 관련 추가 코드만** 모은 독립 예제입니다.
-기존 hello-git 내용은 현재 트리에서 제거했습니다. Git 이력은 유지했습니다.
-Multigon 원본 구현은 포함하지 않으며 실제 Multigon 프로젝트도 수정하지 않았습니다.
+**먼저 `property-usage.cc`만 읽으세요.** 저장과 조회는 아래가 전부입니다.
 
-## 파일
+```cpp
+using namespace layout_property;
 
-- [`property.h`](property.h): 임시 Property/List serializer, 타입 구분, 읽기 view
-- [`property-store.h`](property-store.h): Layout 소유 byte pool + 정렬된 주소 연결표
-- [`oasis-property-adapter.h`](oasis-property-adapter.h): 기존 OASIS Property를 복사·변환하는 추가 함수
-- [`INTEGRATION.md`](INTEGRATION.md): **어느 파일/클래스/함수에 붙일지**, 필요한 코드 조각
-- [`property-usage.cc`](property-usage.cc): 특정 Shape의 Property 저장·조회 예제
+Property property;
+property.name = "net_name";
+property.addText("VDD");
 
-## 구조
+PropertyList list;
+list.push_back(property);
 
-```text
-Layout
-  PropertyStore
-    names_       nameId -> 이름
-    bytes_       Property와 typed value의 내부 encoding
-    lists_       listId -> {offset, byteSize, count}
-    elements_    정렬 vector: Shape 주소 -> listId
-    cells_       정렬 vector: cellId -> listId
-    file_        파일 Property 목록 위치
+store.saveShape(shape.base(), list);
+store.finish(); // 모든 Shape를 저장한 뒤 한 번만
+
+PropertyList found = store.getShape(shape.base());
 ```
 
-Shape에는 필드를 추가하지 않습니다. Property가 있는 소유자만 등록합니다.
-Property 클래스 객체는 임시 변환에 사용하고, 장기 저장은 연속 bytes로 합니다.
-중복 Property 이름·값 순서·standard flag·정수 부호·문자열 종류를 유지합니다.
-OASIS modal/reference는 Builder 단계에서 해소된 값을 저장합니다.
-이는 **의미 보존용 내부 encoding**이지 OASIS 파일의 원본 PROPERTY 바이트가 아닙니다.
-Parser가 이미 정규화/반올림한 값을 원본으로 복원한다고 보장하지 않습니다.
+## 핵심 객체
 
-## 복사 순서
+```text
+PropertyValue  = 값 하나 (문자열, 정수, 실수 등)
+Property       = 이름 + 값 목록
+PropertyList   = Property의 vector
+PropertyStore  = Layout이 가진 저장소
+```
 
-1. 헤더 세 개를 `src/oasis/layout/`로 복사
-2. `INTEGRATION.md`의 Layout/Builder 추가 코드 적용
-3. 전체 import가 끝난 뒤 `freeze()` 한 번 호출
-4. `store.element(shape.base())` -> `store.forEach(...)`로 조회
+값 추가:
+```cpp
+property.addText("VDD");
+property.addInteger(-10);
+property.addUnsigned(10);
+property.addReal(1.25);
+property.addFloat(0.5f);
+property.addRatio(1, 3);
+property.addText(std::string("A\0B", 3), PropertyValue::Binary);
+```
 
-**샘플은 읽기 전용 Import 설계입니다.** 수정·삭제, name-table Property,
-실제 SDK/Writer 연결, 병렬 coordinator 수집은 안내에 남은 통합 작업입니다.
-따라서 헤더만 복사한다고 Multigon 전체 기능이 완성되지는 않습니다.
+조회 결과는 일반 구조체입니다:
+```cpp
+for (const Property& item : found) {
+    for (const PropertyValue& value : item.values) {
+        if (value.type == PropertyValue::Text)
+            std::cout << item.name << " = " << value.text << '\n';
+    }
+}
+```
 
-## 검증된 범위
+GDS는 `property.isGds = true`, `property.gdsAttribute = 17`로 번호를 지정합니다.
+Cell/File은 saveCell/getCell, saveFile/getFile을 사용합니다.
 
-독립 예제의 strict C++11 컴파일/실행 및 ASan+UBSan 실행을 통과했습니다.
-이름 intern, 중복 이름/순서, binary NUL, 정수 경계, rational/float 값,
-파일/Cell/Shape 연결, 없는 Shape 조회, freeze 후 변경 거부를 확인합니다.
-OASIS adapter는 실제 Multigon 헤더를 대상으로 syntax-only 컴파일을 통과했습니다.
-**실제 OASIS 파일 Import/Writer roundtrip 및 메모리·속도 벤치는 수행하지 않았습니다.**
+## 읽는 순서
+
+1. [property-usage.cc](property-usage.cc) — 짧은 저장/조회 예제
+2. [property.h](property.h) — Property 구조체
+3. [property-store.h](property-store.h) — 저장/조회 함수
+4. [INTEGRATION.md](INTEGRATION.md) — Multigon의 어느 위치에 붙이는지
+
+나머지는 내부 구현이므로 처음에는 건너뛰어도 됩니다:
+- `property-store.cc`: 쉬운 구조체와 내부 저장 형식 사이 변환
+- `oasis-property-adapter.h`: 기존 OASIS Property -> 쉬운 Property
+- `detail/`: 기존 byte encoding / 이름 intern / 정렬된 주소표
+
+## 무엇을 쉽게 바꿨나요?
+
+사용 코드에서 key ID, offset, blob, view 수명, template callback을 직접 다루지 않습니다.
+`Property`를 만들고 `saveShape()`/`getShape()`만 사용합니다.
+
+**내부 저장 방식은 유지했습니다.** Shape마다 vector/string 객체를 영구 보관하는
+것이 아니라, 입력 객체를 연속 bytes에 변환하고 주소 연결표는 정렬 vector로 둡니다.
+이름 hash map은 build 중만 사용합니다. Property 순서·중복 이름·값 타입은 보존합니다.
+
+쉬운 `getShape()`는 **조회한 목록 전체를 복사·복원**합니다. 이 복사 비용과 임시
+메모리는 기존 저수준 view 조회보다 추가됩니다. 읽기 쉬운 샘플용 API이며,
+대량 Shape 순회 성능을 보장하거나 Multigon 운영 설정을 변경한 것은 아닙니다.
+내부 zero-copy view 코드는 `detail/`에 남아 있습니다.
+
+## 빌드
 
 ```bash
 g++ -std=c++11 -Wall -Wextra -Wpedantic -Werror -pthread \
-    property-usage.cc -o /tmp/property-example
+    property-usage.cc property-store.cc -o /tmp/property-example
 /tmp/property-example
 ```
 
+실제 출력:
 ```text
-net_name: 1 values
-net_name: 6 values
-empty: 0 values
-PASS: property ownership, lookup, order and typed values
+net_name = VDD
 ```
 
-## 선택한 단순화
+strict C++11 빌드와 별도 회귀/ASan/UBSan 검사를 통과했습니다.
+회귀에서는 타입·정수 경계·binary NUL·순서·중복 이름·파일/Cell/Shape 조회·
+조회 복사본 수명·finish 전후 제한·병렬 저장을 확인했습니다.
+Adapter는 실제 Multigon 헤더로 문법 검사했습니다.
 
-- Shape 연결에는 unordered_map 대신 정렬 vector + lower_bound 사용
-- 이름 intern hash map은 build 중만 사용, freeze 때 제거
-- 이름과 owner 등록의 전역 mutex: 병렬 정확성의 기초만 제공, 성능 미검증
-- 고정 64-bit 길이/offset encoding: 읽기 쉬운 예제이며 최소 크기 최적화 아님
-- 반복 동일 blob도 현재는 복사: dedup은 별도 최적화
-- size가 아니라 vector capacity, list descriptor, 이름 및 mutex 비용도 존재
-- 조회 view는 frozen store의 수명 안에서만 유효
+## 아직 하지 않은 것
 
-이 저장소는 필요한 추가 코드를 읽고 옮기는 용도이며, Multigon의 최종 저장 방식이나
-메모리/속도 tradeoff를 확정·배포한 결과가 아닙니다.
+- Multigon 원본에 실제 적용, SDK/Writer 연결, 파일 roundtrip
+- name 레코드 자체와 생략 TEXT/X/NODE의 Property 보존
+- 편집/삭제, finish 이후 추가 저장, reset/lazy import
+- 원본 OASIS bytes 복원, blob dedup, 성능/메모리 측정
+
+이 저장소는 복사·붙여넣기용 신규 예제만 담습니다. Multigon 원본 소스는 없습니다.
+원래 복잡한 버전은 Git 이력에도 남아 있습니다.
