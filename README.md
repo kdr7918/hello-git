@@ -55,6 +55,8 @@ getShape는 이진 탐색해서 목록의 복사본을 돌려줍니다. 없는 S
 3. [property-store.h](property-store.h) — 실제 저장 멤버
 4. [property-store.cc](property-store.cc) — 복사 저장/정렬/조회
 5. [INTEGRATION.md](INTEGRATION.md) — Multigon에 붙여넣을 위치
+6. [CREATOR.md](CREATOR.md) — 저장된 Property를 Creator로 출력하는 예시
+   ([property-creator.h](property-creator.h): 타입별 변환 함수)
 
 `oasis-property-adapter.h`는 OASIS 객체를 이 구조체로 복사할 때 사용합니다.
 **재인코딩이나 파서 raw capture를 수행하지 않습니다.**
