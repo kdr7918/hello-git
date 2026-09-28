@@ -8,7 +8,7 @@
 namespace layout_property {
 
 // 값 하나. type에 해당하는 필드만 사용합니다.
-// 이 구조체는 입력/조회용이며 Shape마다 영구 저장하지 않습니다.
+// 이번 버전은 이 구조체를 vector에 그대로 저장합니다. 인코딩하지 않습니다.
 struct PropertyValue {
     enum Type { Integer, Unsigned, Ratio, Float, Double, Text, Binary, Name };
 

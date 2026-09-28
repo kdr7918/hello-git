@@ -1,5 +1,6 @@
 #include "property-store.h"
-#include <cstring>
+#include <algorithm>
+#include <functional>
 #include <stdexcept>
 #include <utility>
 
@@ -46,96 +47,72 @@ void Property::addRatio(int64_t numerator, int64_t denominator) {
     values.push_back(std::move(value));
 }
 
-// 아래부터는 내부 변환입니다. 사용하는 쪽은 읽지 않아도 됩니다.
-property_example::PropertyList PropertyStore::encode(const PropertyList& properties) {
-    using namespace property_example;
-    property_example::PropertyList encoded;
-    for (const Property& property : properties) {
-        if (property.isGds && property.standard)
-            throw std::invalid_argument("GDS 속성에는 OASIS standard flag를 쓰지 않습니다");
-        const uint64_t key = property.isGds ? property.gdsAttribute : storage_.internName(property.name);
-        property_example::Property target(
-            property.isGds ? KeyKind::GdsAttribute : KeyKind::OasisName, key, property.standard);
-        for (const PropertyValue& value : property.values) {
-            switch (value.type) {
-                case PropertyValue::Integer: target.addSigned(value.integer); break;
-                case PropertyValue::Unsigned: target.addUnsigned(value.unsignedInteger); break;
-                case PropertyValue::Ratio: target.addRational(value.numerator, value.denominator); break;
-                case PropertyValue::Float: target.addFloat(static_cast<float>(value.real)); break;
-                case PropertyValue::Double: target.addDouble(value.real); break;
-                case PropertyValue::Text: target.addString(ValueKind::AsciiString, value.text); break;
-                case PropertyValue::Binary: target.addString(ValueKind::BinaryString, value.text); break;
-                case PropertyValue::Name: target.addString(ValueKind::NameString, value.text); break;
-                default: throw std::invalid_argument("알 수 없는 값 타입");
-            }
-        }
-        encoded.append(target);
-    }
-    return encoded;
+void PropertyStore::checkSaving() const {
+    if (finished_) throw std::logic_error("finish 이후에는 저장할 수 없습니다");
+}
+void PropertyStore::checkReading() const {
+    if (!finished_) throw std::logic_error("finish 이후에 조회하세요");
 }
 
+// 목록을 그대로 복사합니다. blob, 이름 ID, encode/decode가 없습니다.
 void PropertyStore::saveShape(const void* shape, const PropertyList& properties) {
     if (!shape) throw std::invalid_argument("Shape 주소가 없습니다");
-    storage_.setElement(shape, encode(properties));
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkSaving();
+    if (!properties.empty()) shapes_.push_back(ShapeEntry{shape, properties});
 }
 void PropertyStore::saveCell(uint32_t cellId, const PropertyList& properties) {
-    storage_.setCell(cellId, encode(properties));
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkSaving();
+    if (!properties.empty()) cells_.push_back(CellEntry{cellId, properties});
 }
 void PropertyStore::saveFile(const PropertyList& properties) {
-    storage_.setFile(encode(properties));
+    std::lock_guard<std::mutex> lock(mutex_);
+    checkSaving();
+    if (fileSaved_) throw std::logic_error("파일 Property는 한 번만 저장하세요");
+    PropertyList copy = properties;
+    file_.swap(copy);
+    fileSaved_ = true;
 }
-void PropertyStore::finish() { storage_.freeze(); }
-PropertyList PropertyStore::getShape(const void* shape) const { return decode(storage_.element(shape)); }
-PropertyList PropertyStore::getCell(uint32_t cellId) const { return decode(storage_.cell(cellId)); }
-PropertyList PropertyStore::getFile() const { return decode(storage_.file()); }
 
-PropertyList PropertyStore::decode(property_example::PropertyListRef list) const {
-    using namespace property_example;
-    PropertyList result;
-    storage_.forEach(list, [&](PropertyView stored) {
-        Property property;
-        property.isGds = stored.keyKind == KeyKind::GdsAttribute;
-        property.standard = stored.standard;
-        if (property.isGds) {
-            if (stored.key > UINT32_MAX) throw std::out_of_range("GDS attribute 범위 초과");
-            property.gdsAttribute = static_cast<uint32_t>(stored.key);
-        } else {
-            property.name = storage_.name(stored.key);
-        }
-        stored.forEachValue([&](ValueView value) {
-            switch (value.kind) {
-                case ValueKind::Signed: property.addInteger(signedWord(value.word())); break;
-                case ValueKind::Unsigned: property.addUnsigned(value.word()); break;
-                case ValueKind::Rational: {
-                    const uint8_t* p = value.data;
-                    const int64_t numerator = signedWord(get64(p, value.data + value.size));
-                    const int64_t denominator = signedWord(get64(p, value.data + value.size));
-                    property.addRatio(numerator, denominator);
-                    break;
-                }
-                case ValueKind::Float32: {
-                    uint32_t bits = 0;
-                    for (unsigned i = 0; i < 4; ++i) bits |= uint32_t(value.data[i]) << (8 * i);
-                    float number;
-                    std::memcpy(&number, &bits, sizeof(number));
-                    property.addFloat(number);
-                    break;
-                }
-                case ValueKind::Float64: {
-                    const uint64_t bits = value.word();
-                    double number;
-                    std::memcpy(&number, &bits, sizeof(number));
-                    property.addReal(number);
-                    break;
-                }
-                case ValueKind::AsciiString: property.addText(value.stringCopy()); break;
-                case ValueKind::BinaryString: property.addText(value.stringCopy(), PropertyValue::Binary); break;
-                case ValueKind::NameString: property.addText(value.stringCopy(), PropertyValue::Name); break;
-            }
-        });
-        result.push_back(std::move(property));
+// 정렬은 여기서 한 번만. 같은 owner를 두 번 저장한 실수도 확인합니다.
+void PropertyStore::finish() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (finished_) return;
+    std::sort(shapes_.begin(), shapes_.end(), [](const ShapeEntry& a, const ShapeEntry& b) {
+        return std::less<const void*>()(a.shape, b.shape);
     });
-    return result;
+    std::sort(cells_.begin(), cells_.end(), [](const CellEntry& a, const CellEntry& b) {
+        return a.cellId < b.cellId;
+    });
+    for (size_t i = 1; i < shapes_.size(); ++i)
+        if (shapes_[i - 1].shape == shapes_[i].shape)
+            throw std::logic_error("같은 Shape가 두 번 저장됐습니다");
+    for (size_t i = 1; i < cells_.size(); ++i)
+        if (cells_[i - 1].cellId == cells_[i].cellId)
+            throw std::logic_error("같은 Cell이 두 번 저장됐습니다");
+    finished_ = true;
+}
+
+PropertyList PropertyStore::getShape(const void* shape) const {
+    checkReading();
+    const auto it = std::lower_bound(shapes_.begin(), shapes_.end(), shape,
+        [](const ShapeEntry& entry, const void* address) {
+            return std::less<const void*>()(entry.shape, address);
+        });
+    if (it == shapes_.end() || it->shape != shape) return {};
+    return it->properties;
+}
+PropertyList PropertyStore::getCell(uint32_t cellId) const {
+    checkReading();
+    const auto it = std::lower_bound(cells_.begin(), cells_.end(), cellId,
+        [](const CellEntry& entry, uint32_t id) { return entry.cellId < id; });
+    if (it == cells_.end() || it->cellId != cellId) return {};
+    return it->properties;
+}
+PropertyList PropertyStore::getFile() const {
+    checkReading();
+    return file_;
 }
 
 } // namespace layout_property

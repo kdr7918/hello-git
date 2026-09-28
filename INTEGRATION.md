@@ -5,7 +5,8 @@
 ## 1. 파일 복사
 
 이 저장소의 `property.h`, `property-store.h`, `property-store.cc`,
-`oasis-property-adapter.h`, `detail/`을 `src/oasis/layout/`에 복사합니다.
+`oasis-property-adapter.h`를 `src/oasis/layout/`에 복사합니다.
+`detail/`은 삭제했으며 더 이상 필요하지 않습니다.
 빌드 대상에 `property-store.cc`를 추가합니다. 예제 파일은 복사하지 않아도 됩니다.
 
 ## 2. Layout에 저장소 하나 추가
